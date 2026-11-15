@@ -114,7 +114,7 @@ def download_video_from_url(video_url):
     url_hash = hashlib.sha256(video_url.strip().encode("utf-8")).hexdigest()[:12]
     output_template = str(UPLOAD_DIR / f"url_{url_hash}.%(ext)s")
     options = {
-        "format": "best[ext=mp4]/best",
+        "format": "bv*+ba/b",
         "outtmpl": output_template,
         "noplaylist": True,
         "max_filesize": 1024 * 1024 * 1024,
