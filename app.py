@@ -695,6 +695,8 @@ if st.session_state.show_update_history:
     st.markdown("""
     **Latest update — 15 Nov 2026**\n\n    - Added public video URL fetching for supported platforms (YouTube, Vimeo, Dailymotion, Twitch and Streamable); link fetching does not start clipping automatically.
 
+    - Added Google OAuth connection for YouTube and private uploads of generated Shorts; automatic uploads are opt-in.
+
     - Added category-aware highlight ranking for gaming, sports, vlog/travel, podcast/talking, education/tutorial, reaction/comedy and other videos.
     - Highlight scoring combines visual movement, scene changes and audio activity.
     - Saved source videos are automatically removed after 1 hour when the app next checks the upload list.
