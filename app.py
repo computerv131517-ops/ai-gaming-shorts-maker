@@ -275,8 +275,8 @@ def generate_video_metadata(video_path, job_dir, category):
                 raise TimeoutError('Video analysis 30 minutes se zyada le rahi hai. Dobara try karo.')
             time.sleep(5)
             uploaded_file = client.files.get(name=uploaded_file.name)
-        prompt = '''Analyze the ENTIRE uploaded video, including visual scenes and available audio context.
-Selected category: CATEGORY_PLACEHOLDER.
+        prompt = f'''Analyze the ENTIRE uploaded video, including visual scenes and available audio context.
+Selected category: {category}.
 Create ONE shared metadata set for all Shorts cut from this source video.
 Return ONLY valid JSON with keys title, description, hashtags.
 title: catchy, accurate YouTube Shorts title, max 95 characters.
