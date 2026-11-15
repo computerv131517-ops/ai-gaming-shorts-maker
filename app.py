@@ -615,6 +615,15 @@ with st.sidebar:
     )
     st.caption("Highlights visual movement, scene changes aur audio activity se rank hote hain. Ye abhi semantic understanding ya custom-trained model nahi hai.")
     st.divider()
+    st.header("✨ AI video metadata")
+    if get_gemini_api_key():
+        st.success("Gemini AI metadata connected")
+    else:
+        st.warning("Gemini API key abhi add nahi hai.")
+        st.caption("Streamlit app ke Settings → Secrets mein ye add karo:")
+        st.code('[gemini]\napi_key = "YOUR_GEMINI_API_KEY"')
+        st.caption("Key add karne ke baad app restart/reboot karo. Bina key ke clipping normal chalegi, lekin AI title/description generate nahi honge.")
+    st.divider()
     st.header("▶️ YouTube channel")
     oauth_config = youtube_oauth_config()
     if not oauth_config:
