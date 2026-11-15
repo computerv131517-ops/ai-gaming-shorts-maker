@@ -210,7 +210,9 @@ def export_clips(video_path, chosen, clip_seconds, vertical, output_dir):
             "-t", str(clip_seconds), "-map", "0:v:0", "-map", "0:a?"
         ]
         if vertical:
-            command += ["-vf", "crop=w='trunc(min(iw,ih*9/16)/2)*2':h='trunc(ih/2)*2':x=(iw-ow)/2:y=0"]
+            # Fit the complete frame inside a 9:16 canvas; never crop.
+            # Scale up/down as needed and fill unused space with black bars.
+            command += ["-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"]
         command += [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
@@ -383,13 +385,13 @@ if st.session_state.show_update_history:
     st.markdown("""
     **Latest update — 15 Nov 2026**
 
-    - Added **Save Video Only** and separate processing controls.
+    - Changed 9:16 output to **Fit / No Crop**.
+    - Entire original frame stays visible; extra canvas space is filled with black.
     - Added **Resume Processing** with saved analysis checkpoints.
     - Completed clips are saved individually; returning to the page reuses finished clips.
-    - Interrupted analysis resumes from its latest checkpoint; interrupted clip export retries only the unfinished clip.
     - Original uploaded file remains unchanged.
 
-    **Git commit message:** `Add resumable processing checkpoints`
+    **Git commit message:** `Use fit-to-frame 9:16 output with black background`
 
-    **Previous feature commit:** `af4c311ee1a4fb3f69120391f97992112589d1cd`
+    **Previous feature commit:** `0817307c4383ba59f84c62e8fbb53891e74c474a`
     """)
