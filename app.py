@@ -113,8 +113,11 @@ def download_video_from_url(video_url):
 
     url_hash = hashlib.sha256(video_url.strip().encode("utf-8")).hexdigest()[:12]
     output_template = str(UPLOAD_DIR / f"url_{url_hash}.%(ext)s")
+    is_youtube = (
+        host == "youtube.com" or host.endswith(".youtube.com")
+        or host == "youtu.be" or host.endswith(".youtu.be")
+    )
     options = {
-        "format": "bv*+ba/b",
         "outtmpl": output_template,
         "noplaylist": True,
         "max_filesize": 1024 * 1024 * 1024,
@@ -123,6 +126,12 @@ def download_video_from_url(video_url):
         "no_warnings": True,
         "restrictfilenames": True,
     }
+    if is_youtube:
+        # Let yt-dlp choose from the formats actually exposed by YouTube.
+        # The Android player client is a fallback for YouTube's changing web formats.
+        options["extractor_args"] = {"youtube": {"player_client": ["android"]}}
+    else:
+        options["format"] = "bv*+ba/b"
     try:
         with yt_dlp.YoutubeDL(options) as downloader:
             info = downloader.extract_info(video_url.strip(), download=True)
