@@ -99,6 +99,20 @@ def save_uploaded_video(uploaded_file):
     progress.empty()
     return destination
 
+def delete_source_video_after_download(source_path):
+    """Remove the original upload after a generated clip/ZIP is requested for download."""
+    try:
+        source = Path(source_path)
+        if source.is_file():
+            source.unlink()
+        # Keep the path in session state so the app can still locate the generated clips.
+        st.session_state.source_deleted_after_download = True
+    except FileNotFoundError:
+        st.session_state.source_deleted_after_download = True
+    except OSError as error:
+        st.session_state.source_delete_error = str(error)
+
+
 def download_video_from_url(video_url):
     """Download a public video from supported sites; never use login/cookies or bypass access controls."""
     parsed = urlparse(video_url.strip())
@@ -567,6 +581,7 @@ else:
         st.success(f"Selected video: {selected_path.name}")
         st.video(str(selected_path))
         job_dir = get_job_dir(selected_path, clip_seconds, number_of_clips, vertical, category)
+        st.session_state.last_job_dir = str(job_dir)
         checkpoint_file = str(job_dir / "analysis_checkpoint.json")
         analysis_file = job_dir / "analysis.json"
         output_dir = str(job_dir / "clips")
@@ -649,7 +664,9 @@ else:
                             data=file.read(),
                             file_name=clip_path.name,
                             mime="video/mp4",
-                            key=f"download_{job_dir.name}_{clip_path.name}"
+                            key=f"download_{job_dir.name}_{clip_path.name}",
+                            on_click=delete_source_video_after_download,
+                            args=(str(selected_path),)
                         )
 
             zip_path = job_dir / "Gaming_Shorts.zip"
@@ -664,12 +681,49 @@ else:
                         file_name="Gaming_Shorts.zip",
                         mime="application/zip",
                         type="primary",
-                        use_container_width=True
+                        use_container_width=True,
+                        on_click=delete_source_video_after_download,
+                        args=(str(selected_path),)
                     )
     else:
-        st.warning("Selected video nahi mil rahi. Upload page par wapas jaakar video dobara save karo.")
+        # The original source may have been deleted after a clip/ZIP download.
+        # Keep generated clips available from the saved job directory.
+        last_job_dir = Path(st.session_state.get("last_job_dir", "")) if st.session_state.get("last_job_dir") else None
+        saved_clips = sorted(last_job_dir.joinpath("clips").glob("Gaming_Short_*.mp4")) if last_job_dir and last_job_dir.exists() else []
+        if saved_clips:
+            st.success("Original uploaded video download ke baad delete ho gayi. Generated clips abhi available hain.")
+            st.subheader("Your generated Shorts")
+            for clip_path in saved_clips:
+                with st.expander(clip_path.name, expanded=False):
+                    st.video(str(clip_path))
+                    with open(clip_path, "rb") as file:
+                        st.download_button(
+                            f"Download {clip_path.name}",
+                            data=file.read(),
+                            file_name=clip_path.name,
+                            mime="video/mp4",
+                            key=f"download_saved_{last_job_dir.name}_{clip_path.name}"
+                        )
+            zip_path = last_job_dir / "Gaming_Shorts.zip"
+            if len(saved_clips) > 1:
+                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+                    for clip_path in saved_clips:
+                        archive.write(clip_path, arcname=clip_path.name)
+                with open(zip_path, "rb") as file:
+                    st.download_button(
+                        "⬇️ Download all completed clips (ZIP)",
+                        data=file.read(),
+                        file_name="Gaming_Shorts.zip",
+                        mime="application/zip",
+                        type="primary",
+                        use_container_width=True
+                    )
+        else:
+            st.warning("Selected video nahi mil rahi. Upload page par wapas jaakar video dobara save karo.")
         if st.button("← Back to Uploads"):
             st.session_state.page = "upload"
+            st.session_state.selected_video = ""
+            st.session_state.pop("last_job_dir", None)
             st.rerun()
 
 st.divider()
@@ -677,7 +731,7 @@ st.caption(
     "Upload ke waqt original video bytes save hote hain; upload par compression nahi hoti. "
     "Generated clips re-encode hoti hain, isliye output bilkul bit-for-bit original nahi hota. "
     "Vertical Shorts ke liye full-frame fit with black background hota hai. Streamlit Cloud ka local storage temporary hai; "
-    "saved source videos upload list check hone par 1 hour ke baad automatically delete ho jati hain; "
+    "original source video clip ya ZIP download karte hi delete ho jati hai; otherwise saved source videos upload list check hone par 1 hour ke baad automatically delete ho jati hain; "
     "cleanup app activity par hota hai, exact minute par background timer nahi chalta. "
     "Large files upload hone mein internet speed aur hosting limits ka asar padega."
 )
@@ -700,7 +754,7 @@ if st.session_state.show_update_history:
 
     - Added category-aware highlight ranking for gaming, sports, vlog/travel, podcast/talking, education/tutorial, reaction/comedy and other videos.
     - Highlight scoring combines visual movement, scene changes and audio activity.
-    - Saved source videos are automatically removed after 1 hour when the app next checks the upload list.
+    - Original source video is deleted after the first generated clip or ZIP download; generated clips remain available. If not downloaded, saved source videos are automatically removed after 1 hour when the app next checks the upload list.
     - 9:16 output uses full-frame fit with black background; no cropping.
     - Added resumable analysis checkpoints and reuse of completed clips.
 
