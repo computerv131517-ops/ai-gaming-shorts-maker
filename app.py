@@ -462,7 +462,7 @@ def export_clips(video_path, chosen, clip_seconds, vertical, output_dir):
 with st.sidebar:
     st.header("⚙️ Clip settings")
     clip_seconds = st.slider("Har clip ki length (seconds)", 10, 60, 20, 5)
-    number_of_clips = st.slider("Kitni clips banani hain?", 1, 10, 5)
+    number_of_clips = st.slider("Kitni clips banani hain?", 1, 20, 5)
     vertical = st.checkbox("9:16 YouTube Shorts format", value=True)
     category = st.selectbox(
         "Video category",
@@ -509,7 +509,8 @@ if st.session_state.page == "upload":
     uploaded = st.file_uploader(
         "Gameplay video select karo",
         type=["mp4", "mov", "mkv", "avi"],
-        help="Upload ke waqt original file ko compress ya resize nahi kiya jata."
+        help="Maximum upload size: 1 GB (1024 MB). Upload ke waqt original file ko compress ya resize nahi kiya jata.",
+        max_upload_size=1024
     )
 
     if uploaded is not None:
