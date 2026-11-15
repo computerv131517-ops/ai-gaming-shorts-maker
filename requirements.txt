@@ -5,3 +5,4 @@ imageio-ffmpeg>=0.5
 yt-dlp>=2025.1.15
 google-api-python-client>=2.150
 google-auth-oauthlib>=1.2
+google-genai>=1.30.0
