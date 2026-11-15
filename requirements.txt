@@ -2,4 +2,4 @@ streamlit>=1.36,<2
 opencv-python-headless>=4.9
 numpy>=1.26
 imageio-ffmpeg>=0.5
-yt-dlp[default]>=2025.1.15
+yt-dlp>=2025.1.15
