@@ -295,6 +295,48 @@ def get_job_dir(video_path, clip_seconds, number_of_clips, vertical, category):
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 
+CLIP_HISTORY_RETENTION_SECONDS = 60 * 60
+
+def cleanup_expired_clip_history():
+    """Remove generated clip jobs one hour after their newest clip was created."""
+    jobs_root = UPLOAD_DIR / "processing_jobs"
+    if not jobs_root.exists():
+        return
+    now = time.time()
+    for job_dir in jobs_root.iterdir():
+        if not job_dir.is_dir():
+            continue
+        clips_dir = job_dir / "clips"
+        clips = list(clips_dir.glob("Gaming_Short_*.mp4")) if clips_dir.exists() else []
+        if not clips:
+            continue
+        newest_clip_time = max(path.stat().st_mtime for path in clips)
+        if now - newest_clip_time >= CLIP_HISTORY_RETENTION_SECONDS:
+            shutil.rmtree(job_dir, ignore_errors=True)
+
+
+def list_clip_history():
+    cleanup_expired_clip_history()
+    jobs_root = UPLOAD_DIR / "processing_jobs"
+    if not jobs_root.exists():
+        return []
+    history = []
+    for job_dir in jobs_root.iterdir():
+        clips_dir = job_dir / "clips"
+        if not job_dir.is_dir() or not clips_dir.exists():
+            continue
+        clips = sorted(clips_dir.glob("Gaming_Short_*.mp4"))
+        if clips:
+            newest_clip_time = max(path.stat().st_mtime for path in clips)
+            history.append({
+                "job_dir": job_dir,
+                "clips": clips,
+                "created_at": min(path.stat().st_mtime for path in clips),
+                "expires_at": newest_clip_time + CLIP_HISTORY_RETENTION_SECONDS,
+            })
+    return sorted(history, key=lambda item: item["created_at"], reverse=True)
+
+
 def normalize_signal(values):
     values = np.asarray(values, dtype=np.float32)
     if values.size == 0:
@@ -474,6 +516,11 @@ def export_clips(video_path, chosen, clip_seconds, vertical, output_dir):
     return outputs
 
 with st.sidebar:
+    st.header("📚 Your clips")
+    if st.button("🕒 Clip History (last 1 hour)", use_container_width=True):
+        st.session_state.page = "history"
+        st.rerun()
+    st.divider()
     st.header("⚙️ Clip settings")
     clip_seconds = st.slider("Har clip ki length (seconds)", 10, 60, 20, 5)
     number_of_clips = st.slider("Kitni clips banani hain?", 1, 20, 5)
@@ -516,7 +563,48 @@ with st.sidebar:
         help="Private upload hogi; channel par public nahi dikhegi jab tak tum visibility change na karo."
     )
 
-if st.session_state.page == "upload":
+if st.session_state.page == "history":
+    st.subheader("🕒 Clip History — last 1 hour")
+    st.caption("Generated clips yahan 1 ghante tak milengi. Iske baad app unhe automatically clean up karegi jab history check hogi.")
+    history_items = list_clip_history()
+    if history_items:
+        for item in history_items:
+            job_dir = item["job_dir"]
+            clips = item["clips"]
+            minutes_left = max(0, int((item["expires_at"] - time.time()) / 60))
+            with st.expander(f"{job_dir.name} · {len(clips)} clips · approx. {minutes_left} min left", expanded=True):
+                for clip_path in clips:
+                    st.write(f"**{clip_path.name}**")
+                    st.video(str(clip_path))
+                    with open(clip_path, "rb") as clip_file:
+                        st.download_button(
+                            f"⬇️ Download {clip_path.name}",
+                            data=clip_file.read(),
+                            file_name=clip_path.name,
+                            mime="video/mp4",
+                            key=f"history_download_{job_dir.name}_{clip_path.name}"
+                        )
+                if len(clips) > 1:
+                    zip_path = job_dir / "Gaming_Shorts.zip"
+                    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+                        for clip_path in clips:
+                            archive.write(clip_path, arcname=clip_path.name)
+                    with open(zip_path, "rb") as zip_file:
+                        st.download_button(
+                            "⬇️ Download all clips (ZIP)",
+                            data=zip_file.read(),
+                            file_name="Gaming_Shorts.zip",
+                            mime="application/zip",
+                            type="primary",
+                            key=f"history_zip_{job_dir.name}"
+                        )
+    else:
+        st.info("Pichhle 1 ghante mein koi generated clips nahi mili.")
+    if st.button("← Back to Upload"):
+        st.session_state.page = "upload"
+        st.rerun()
+
+elif st.session_state.page == "upload":
     st.subheader("1. Upload your gameplay")
     st.write("Yahan video sirf save hogi. Processing tab tak start nahi hogi jab tak aap khud button na dabayein.")
 
@@ -731,7 +819,7 @@ st.caption(
     "Upload ke waqt original video bytes save hote hain; upload par compression nahi hoti. "
     "Generated clips re-encode hoti hain, isliye output bilkul bit-for-bit original nahi hota. "
     "Vertical Shorts ke liye full-frame fit with black background hota hai. Streamlit Cloud ka local storage temporary hai; "
-    "original source video clip ya ZIP download karte hi delete ho jati hai; otherwise saved source videos upload list check hone par 1 hour ke baad automatically delete ho jati hain; "
+    "original source video clip ya ZIP download karte hi delete ho jati hai; generated clips history mein 1 hour tak available rehti hain aur uske baad history check hone par delete ho jati hain; "
     "cleanup app activity par hota hai, exact minute par background timer nahi chalta. "
     "Large files upload hone mein internet speed aur hosting limits ka asar padega."
 )
@@ -754,7 +842,7 @@ if st.session_state.show_update_history:
 
     - Added category-aware highlight ranking for gaming, sports, vlog/travel, podcast/talking, education/tutorial, reaction/comedy and other videos.
     - Highlight scoring combines visual movement, scene changes and audio activity.
-    - Original source video is deleted after the first generated clip or ZIP download; generated clips remain available. If not downloaded, saved source videos are automatically removed after 1 hour when the app next checks the upload list.
+    - Original source video is deleted after the first generated clip or ZIP download. Generated clips appear in Clip History for 1 hour with individual and ZIP download options, then are cleaned up when history is checked.
     - 9:16 output uses full-frame fit with black background; no cropping.
     - Added resumable analysis checkpoints and reuse of completed clips.
 
