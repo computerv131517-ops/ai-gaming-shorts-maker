@@ -98,37 +98,62 @@ def save_json_atomic(path, data):
         json.dump(data, file)
     os.replace(temp_path, path)
 
-def get_job_dir(video_path, clip_seconds, number_of_clips, vertical):
+def get_job_dir(video_path, clip_seconds, number_of_clips, vertical, category):
     digest = hashlib.sha256()
     with open(video_path, "rb") as source:
         for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""):
             digest.update(chunk)
-    settings = f"{clip_seconds}|{number_of_clips}|{int(vertical)}"
+    settings = f"{clip_seconds}|{number_of_clips}|{int(vertical)}|{category}"
     job_id = hashlib.sha256((digest.hexdigest() + settings).encode()).hexdigest()[:20]
     folder = UPLOAD_DIR / "processing_jobs" / job_id
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 
-def analyse_video(video_path, clip_seconds, number_of_clips, checkpoint_file):
+def normalize_signal(values):
+    values = np.asarray(values, dtype=np.float32)
+    if values.size == 0:
+        return values
+    low = float(np.percentile(values, 10))
+    high = float(np.percentile(values, 90))
+    if high - low < 1e-6:
+        return np.zeros_like(values)
+    return np.clip((values - low) / (high - low), 0.0, 1.0)
+
+def extract_audio_activity(video_path, sample_times):
+    """Measure short-window audio energy. This is an activity signal, not speech understanding."""
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    command = [ffmpeg, "-v", "error", "-i", str(video_path), "-vn",
+               "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1"]
+    try:
+        result = subprocess.run(command, capture_output=True, check=True)
+        audio = np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32)
+        samples_per_window = 4000
+        energy = []
+        for idx in range(len(sample_times)):
+            chunk = audio[idx * samples_per_window:(idx + 1) * samples_per_window]
+            energy.append(float(np.sqrt(np.mean(chunk * chunk))) if chunk.size else 0.0)
+        return normalize_signal(energy)
+    except Exception:
+        return np.zeros(len(sample_times), dtype=np.float32)
+
+def analyse_video(video_path, clip_seconds, number_of_clips, checkpoint_file, category):
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise ValueError("Video open nahi ho paayi. MP4 file try karo.")
-
     fps = cap.get(cv2.CAP_PROP_FPS)
     frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
     if not fps or not frame_count:
         cap.release()
         raise ValueError("Video ka FPS ya duration read nahi ho paaya.")
-
     duration = frame_count / fps
     if duration < clip_seconds:
         cap.release()
         raise ValueError(f"Video sirf {duration:.1f} seconds ki hai. Clip length kam select karo.")
 
     sample_times = np.arange(0, duration, 0.5)
-    previous = None
-    scores = []
-    score_times = []
+    audio_scores = extract_audio_activity(video_path, sample_times)
+    previous, previous_hist = None, None
+    motion_scores, scene_scores, score_times = [], [], []
     next_idx = 0
 
     if os.path.exists(checkpoint_file):
@@ -136,17 +161,22 @@ def analyse_video(video_path, clip_seconds, number_of_clips, checkpoint_file):
             with open(checkpoint_file, "r", encoding="utf-8") as file:
                 saved = json.load(file)
             next_idx = int(saved.get("next_idx", 0))
-            scores = [float(x) for x in saved.get("scores", [])]
+            motion_scores = [float(x) for x in saved.get("motion_scores", [])]
+            scene_scores = [float(x) for x in saved.get("scene_scores", [])]
             score_times = [float(x) for x in saved.get("score_times", [])]
-            previous_data = saved.get("previous")
+            previous_data, hist_data = saved.get("previous"), saved.get("previous_hist")
             previous = np.array(previous_data, dtype=np.uint8) if previous_data else None
+            previous_hist = np.array(hist_data, dtype=np.float32) if hist_data else None
+            if len(motion_scores) != len(score_times) or len(scene_scores) != len(score_times):
+                raise ValueError("Old checkpoint format")
             next_idx = min(next_idx, len(sample_times))
             st.info(f"Analysis checkpoint se resume ho raha hai: {next_idx}/{len(sample_times)} samples.")
         except Exception:
-            next_idx, scores, score_times, previous = 0, [], [], None
+            next_idx, motion_scores, scene_scores, score_times = 0, [], [], []
+            previous, previous_hist = None, None
 
     progress = st.progress(min(next_idx / max(len(sample_times), 1), 1.0),
-                           text="Gameplay analysis resume ho raha hai...")
+                           text="Multi-signal video analysis resume ho raha hai...")
     for idx in range(next_idx, len(sample_times)):
         timestamp = sample_times[idx]
         cap.set(cv2.CAP_PROP_POS_MSEC, float(timestamp * 1000))
@@ -154,40 +184,55 @@ def analyse_video(video_path, clip_seconds, number_of_clips, checkpoint_file):
         if ok:
             small = cv2.resize(frame, (320, 180))
             gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            hist = cv2.calcHist([gray], [0], None, [32], [0, 256]).flatten()
+            hist = hist / max(float(hist.sum()), 1.0)
             if previous is not None:
-                scores.append(float(cv2.absdiff(previous, gray).mean()))
+                motion_scores.append(float(cv2.absdiff(previous, gray).mean()))
+                scene_scores.append(float(np.abs(previous_hist - hist).sum() / 2.0))
                 score_times.append(float(timestamp))
-            previous = gray
+            previous, previous_hist = gray, hist
 
-        # Save a checkpoint every 10 samples (about 5 seconds of source video).
         if (idx + 1) % 10 == 0 or idx == len(sample_times) - 1:
             save_json_atomic(checkpoint_file, {
-                "next_idx": idx + 1,
-                "scores": scores,
-                "score_times": score_times,
-                "previous": previous.tolist() if previous is not None else None
+                "next_idx": idx + 1, "motion_scores": motion_scores,
+                "scene_scores": scene_scores, "score_times": score_times,
+                "previous": previous.tolist() if previous is not None else None,
+                "previous_hist": previous_hist.tolist() if previous_hist is not None else None
             })
         if idx % 5 == 0 or idx == len(sample_times) - 1:
             progress.progress(min((idx + 1) / len(sample_times), 1.0),
-                              text=f"Gameplay analyse ho raha hai... {idx + 1}/{len(sample_times)}")
-
+                              text=f"Video analyse ho rahi hai... {idx + 1}/{len(sample_times)}")
     cap.release()
     progress.empty()
 
-    if not scores:
+    if not motion_scores:
         raise ValueError("Video se visual frames analyse nahi ho paaye.")
+    motion = normalize_signal(motion_scores)
+    scene = normalize_signal(scene_scores)
+    audio = audio_scores[1:1 + len(score_times)]
+    if len(audio) < len(score_times):
+        audio = np.pad(audio, (0, len(score_times) - len(audio)))
+    audio = np.asarray(audio, dtype=np.float32)
 
-    step = 0.5
-    starts = np.arange(0, max(0, duration - clip_seconds) + 0.001, step)
-    candidates = []
-    score_array = np.asarray(scores)
-    time_array = np.asarray(score_times)
+    profiles = {
+        "Auto (all categories)": (0.40, 0.30, 0.30),
+        "Gaming": (0.55, 0.15, 0.30),
+        "Sports": (0.45, 0.30, 0.25),
+        "Vlog / Travel": (0.20, 0.45, 0.35),
+        "Podcast / Talking": (0.05, 0.15, 0.80),
+        "Education / Tutorial": (0.10, 0.20, 0.70),
+        "Reaction / Comedy": (0.25, 0.25, 0.50),
+        "Other": (0.34, 0.33, 0.33)
+    }
+    w_motion, w_scene, w_audio = profiles.get(category, profiles["Auto (all categories)"])
+    combined = motion * w_motion + scene * w_scene + audio * w_audio
 
+    starts = np.arange(0, max(0, duration - clip_seconds) + 0.001, 0.5)
+    candidates, time_array = [], np.asarray(score_times)
     for start_time in starts:
         mask = (time_array >= start_time) & (time_array < start_time + clip_seconds)
         if np.any(mask):
-            candidates.append((float(score_array[mask].mean()), float(start_time)))
-
+            candidates.append((float(combined[mask].mean()), float(start_time)))
     candidates.sort(reverse=True)
     chosen = []
     for score, start_time in candidates:
@@ -197,7 +242,6 @@ def analyse_video(video_path, clip_seconds, number_of_clips, checkpoint_file):
             chosen.append((score, start_time))
         if len(chosen) >= number_of_clips:
             break
-
     try:
         os.remove(checkpoint_file)
     except FileNotFoundError:
@@ -248,7 +292,12 @@ with st.sidebar:
     clip_seconds = st.slider("Har clip ki length (seconds)", 10, 60, 20, 5)
     number_of_clips = st.slider("Kitni clips banani hain?", 1, 10, 5)
     vertical = st.checkbox("9:16 YouTube Shorts format", value=True)
-    st.caption("Movement score ek estimate hai; camera movement bhi score badha sakta hai.")
+    category = st.selectbox(
+        "Video category",
+        ["Auto (all categories)", "Gaming", "Sports", "Vlog / Travel",
+         "Podcast / Talking", "Education / Tutorial", "Reaction / Comedy", "Other"]
+    )
+    st.caption("Highlights visual movement, scene changes aur audio activity se rank hote hain. Ye abhi semantic understanding ya custom-trained model nahi hai.")
 
 if st.session_state.page == "upload":
     st.subheader("1. Upload your gameplay")
@@ -296,7 +345,7 @@ else:
     if selected_path and selected_path.exists():
         st.success(f"Selected video: {selected_path.name}")
         st.video(str(selected_path))
-        job_dir = get_job_dir(selected_path, clip_seconds, number_of_clips, vertical)
+        job_dir = get_job_dir(selected_path, clip_seconds, number_of_clips, vertical, category)
         checkpoint_file = str(job_dir / "analysis_checkpoint.json")
         analysis_file = job_dir / "analysis.json"
         output_dir = str(job_dir / "clips")
@@ -322,13 +371,14 @@ else:
                         st.success("Saved analysis loaded. Analysis dobara nahi chalegi.")
                     else:
                         duration, chosen = analyse_video(
-                            selected_path, clip_seconds, number_of_clips, checkpoint_file
+                            selected_path, clip_seconds, number_of_clips, checkpoint_file, category
                         )
                         if not chosen:
                             st.error("Is video mein selected length ke clips nahi mil paaye.")
                         else:
                             save_json_atomic(analysis_file, {
                                 "duration": duration,
+                                "category": category,
                                 "chosen": [[score, start_time] for score, start_time in chosen]
                             })
                     if chosen:
@@ -382,7 +432,7 @@ st.divider()
 st.caption(
     "Upload ke waqt original video bytes save hote hain; upload par compression nahi hoti. "
     "Generated clips re-encode hoti hain, isliye output bilkul bit-for-bit original nahi hota. "
-    "Vertical Shorts ke liye center crop hota hai. Streamlit Cloud ka local storage temporary hai; "
+    "Vertical Shorts ke liye full-frame fit with black background hota hai. Streamlit Cloud ka local storage temporary hai; "
     "saved source videos upload list check hone par 1 hour ke baad automatically delete ho jati hain; "
     "cleanup app activity par hota hai, exact minute par background timer nahi chalta. "
     "Large files upload hone mein internet speed aur hosting limits ka asar padega."
@@ -402,13 +452,13 @@ if st.session_state.show_update_history:
     st.markdown("""
     **Latest update — 15 Nov 2026**
 
+    - Added category-aware highlight ranking for gaming, sports, vlog/travel, podcast/talking, education/tutorial, reaction/comedy and other videos.
+    - Highlight scoring combines visual movement, scene changes and audio activity.
     - Saved source videos are automatically removed after 1 hour when the app next checks the upload list.
-    - Changed 9:16 output to **Fit / No Crop** with black background.
-    - Added **Resume Processing** with saved analysis checkpoints.
-    - Completed clips are saved individually; returning to the page reuses finished clips.
-    - Original uploaded file remains unchanged until automatic expiry.
+    - 9:16 output uses full-frame fit with black background; no cropping.
+    - Added resumable analysis checkpoints and reuse of completed clips.
 
-    **Git commit message:** `Delete saved source videos after one hour`
+    **Git commit message:** `Add category-aware multi-signal highlight detection`
 
-    **Previous feature commit:** `e147de473aa82e1cbac52016766e36d522584a3a`
+    **Previous feature commit:** `67f028b763fa1b415b1b9d74c49f86f9f56a9968`
     """)
