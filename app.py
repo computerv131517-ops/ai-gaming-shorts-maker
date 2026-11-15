@@ -258,13 +258,52 @@ def load_video_metadata(job_dir):
         return None
 
 
+def generate_basic_video_metadata(video_path, job_dir, category):
+    """Create simple shared metadata locally, without an external AI key."""
+    existing = load_video_metadata(job_dir)
+    if existing:
+        return existing
+
+    category_key = str(category or "Auto (all categories)").strip().lower()
+    source_name = Path(video_path).stem
+    source_name = re.sub(r"[_-]+", " ", source_name)
+    source_name = re.sub(r"[^A-Za-z0-9 ]+", " ", source_name)
+    source_name = re.sub(r"\\s+", " ", source_name).strip()
+    if not source_name or re.fullmatch(r"[0-9a-fA-F]{8,}", source_name):
+        source_name = ""
+
+    category_data = {
+        "gaming": ("Gaming Highlights", ["#Gaming", "#Gameplay", "#Gamer", "#Shorts"]),
+        "sports": ("Sports Highlights", ["#Sports", "#Highlights", "#SportsShorts", "#Shorts"]),
+        "vlog / travel": ("Vlog & Travel Highlights", ["#Vlog", "#Travel", "#Explore", "#Shorts"]),
+        "podcast / talking": ("Podcast Highlights", ["#Podcast", "#Talking", "#Clips", "#Shorts"]),
+        "education / tutorial": ("Learning Highlights", ["#Education", "#Learning", "#Tutorial", "#Shorts"]),
+        "reaction / comedy": ("Funny & Reaction Highlights", ["#Reaction", "#Funny", "#Comedy", "#Shorts"]),
+        "other": ("Video Highlights", ["#Highlights", "#Video", "#Clips", "#Shorts"]),
+        "auto (all categories)": ("Video Highlights", ["#Highlights", "#Clips", "#Trending", "#Shorts"]),
+    }
+    label, hashtags = category_data.get(category_key, category_data["auto (all categories)"])
+    subject = source_name[:55].strip()
+    title = f"{subject} | {label} #Shorts" if subject else f"{label} #Shorts"
+    title = title[:95]
+    description_subject = f" from {subject}" if subject else ""
+    description = (
+        f"Watch these {label.lower()}{description_subject}. "
+        "This video has been split into short clips for easy viewing. "
+        "Enjoy the highlights!"
+    )
+    metadata = {"title": title, "description": description, "hashtags": hashtags}
+    save_json_atomic(Path(job_dir) / "video_metadata.json", metadata)
+    return metadata
+
+
 def generate_video_metadata(video_path, job_dir, category):
     existing = load_video_metadata(job_dir)
     if existing:
         return existing
     api_key = get_gemini_api_key()
     if not api_key:
-        return None
+        return generate_basic_video_metadata(video_path, job_dir, category)
     from google import genai
     client = genai.Client(api_key=api_key)
     uploaded_file = None
