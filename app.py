@@ -240,6 +240,10 @@ def get_youtube_service():
 
 
 def get_gemini_api_key():
+    # A key entered in the sidebar is kept only in this Streamlit session.
+    session_key = st.session_state.get("gemini_api_key_input", "").strip()
+    if session_key:
+        return session_key
     try:
         return st.secrets.get('gemini', {}).get('api_key', '') or st.secrets.get('GEMINI_API_KEY', '')
     except Exception:
@@ -616,13 +620,19 @@ with st.sidebar:
     st.caption("Highlights visual movement, scene changes aur audio activity se rank hote hain. Ye abhi semantic understanding ya custom-trained model nahi hai.")
     st.divider()
     st.header("✨ AI video metadata")
+    st.text_input(
+        "Gemini API Key",
+        type="password",
+        key="gemini_api_key_input",
+        placeholder="Paste your Gemini API key",
+        help="Key is used only in this active app session and is not written to the GitHub code or job files."
+    )
     if get_gemini_api_key():
-        st.success("Gemini AI metadata connected")
+        st.success("Gemini API key available for this session")
+        st.caption("Key ko chat, screenshot ya public GitHub file mein share mat karna.")
     else:
-        st.warning("Gemini API key abhi add nahi hai.")
-        st.caption("Streamlit app ke Settings → Secrets mein ye add karo:")
-        st.code('[gemini]\napi_key = "YOUR_GEMINI_API_KEY"')
-        st.caption("Key add karne ke baad app restart/reboot karo. Bina key ke clipping normal chalegi, lekin AI title/description generate nahi honge.")
+        st.info("Gemini API key paste karo. Ya phir Streamlit Secrets ka existing setup use kar sakte ho.")
+        st.caption("Bina key ke clipping chalegi, lekin AI title/description/hashtags generate nahi honge.")
     st.divider()
     st.header("▶️ YouTube channel")
     oauth_config = youtube_oauth_config()
@@ -942,7 +952,7 @@ if st.session_state.show_update_history:
 
     - Added Google OAuth connection for YouTube and private uploads of generated Shorts; automatic uploads are opt-in.
 
-    - Added full-video AI analysis for one shared YouTube title, description and hashtags across all clips (Gemini API key required in Streamlit Secrets).\n    - Added category-aware highlight ranking for gaming, sports, vlog/travel, podcast/talking, education/tutorial, reaction/comedy and other videos.
+    - Added full-video AI analysis for one shared YouTube title, description and hashtags across all clips (Gemini API key can be entered in the sidebar for the active session or configured in Streamlit Secrets).\n    - Added category-aware highlight ranking for gaming, sports, vlog/travel, podcast/talking, education/tutorial, reaction/comedy and other videos.
     - Highlight scoring combines visual movement, scene changes and audio activity.
     - Original source video is deleted after the first generated clip or ZIP download. Generated clips appear in Clip History for 1 hour with individual and ZIP download options, then are cleaned up when history is checked.
     - 9:16 output uses full-frame fit with black background; no cropping.
