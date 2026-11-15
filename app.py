@@ -283,3 +283,27 @@ st.caption(
     "Large files upload hone mein internet speed aur hosting limits ka asar padega."
 )
 st.caption("Sirf apne ya permission wale gameplay videos upload karo. Free hosting par bade videos process hone mein waqt lag sakta hai.")
+
+# Update history: keep this section at the bottom so users can see what changed.
+if "show_update_history" not in st.session_state:
+    st.session_state.show_update_history = False
+
+st.divider()
+if st.button("🆕 Updates & Commit History", use_container_width=True):
+    st.session_state.show_update_history = not st.session_state.show_update_history
+
+if st.session_state.show_update_history:
+    st.markdown("### Website updates")
+    st.markdown("""
+    **Latest update — 15 Nov 2026**
+
+    - Added **Save Video Only**: uploading no longer starts video processing.
+    - Added a saved-videos list and a separate **Continue to Processing** step.
+    - Added **Back to Uploads** navigation.
+    - Original uploaded file is saved without upload-time compression.
+    - Improved clip export quality settings and reduced unnecessary upscaling in vertical crop.
+
+    **Git commit message:** `Add updates button and commit history`
+
+    **Previous feature commit:** `fdb09cb5c69d33171420c0cc1d765bc22c6640f2`
+    """)
