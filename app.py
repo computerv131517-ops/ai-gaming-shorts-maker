@@ -10,6 +10,11 @@ import json
 from pathlib import Path
 from urllib.parse import urlparse
 import yt_dlp
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
 import cv2
 import numpy as np
@@ -154,6 +159,110 @@ def download_video_from_url(video_url):
                 "ya format change kar deti hain. Details: " + error_text[:500]
             )
         raise RuntimeError(message) from error
+
+YOUTUBE_UPLOAD_SCOPE = ["https://www.googleapis.com/auth/youtube.upload"]
+YOUTUBE_REDIRECT_URI = "https://ai-gaming-shorts-maker.streamlit.app"
+
+
+def youtube_oauth_config():
+    try:
+        cfg = st.secrets.get("google_oauth", {})
+        client_id = cfg.get("client_id", "")
+        client_secret = cfg.get("client_secret", "")
+    except Exception:
+        return None
+    if not client_id or not client_secret:
+        return None
+    return {
+        "web": {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [YOUTUBE_REDIRECT_URI],
+        }
+    }
+
+
+def handle_youtube_oauth_callback():
+    code = st.query_params.get("code")
+    returned_state = st.query_params.get("state")
+    if not code:
+        return
+    expected_state = st.session_state.get("youtube_oauth_state")
+    config = youtube_oauth_config()
+    if not config or not expected_state or returned_state != expected_state:
+        st.session_state.youtube_oauth_error = "Google sign-in verify nahi ho paaya. Connect button dobara try karo."
+        st.query_params.clear()
+        return
+    try:
+        flow = Flow.from_client_config(
+            config, scopes=YOUTUBE_UPLOAD_SCOPE, state=expected_state
+        )
+        flow.redirect_uri = YOUTUBE_REDIRECT_URI
+        flow.fetch_token(code=code)
+        st.session_state.youtube_credentials = flow.credentials.to_json()
+        st.session_state.youtube_oauth_state = None
+        st.session_state.youtube_oauth_error = None
+    except Exception as error:
+        st.session_state.youtube_oauth_error = "Google connection failed: " + str(error)[:300]
+    st.query_params.clear()
+    st.rerun()
+
+
+def get_youtube_service():
+    token_json = st.session_state.get("youtube_credentials")
+    if not token_json:
+        return None
+    credentials = Credentials.from_authorized_user_info(
+        json.loads(token_json), scopes=YOUTUBE_UPLOAD_SCOPE
+    )
+    if credentials.expired and credentials.refresh_token:
+        credentials.refresh(Request())
+        st.session_state.youtube_credentials = credentials.to_json()
+    if not credentials.valid:
+        raise RuntimeError("YouTube session expire ho gaya. Google account dobara connect karo.")
+    return build("youtube", "v3", credentials=credentials, cache_discovery=False)
+
+
+def upload_clips_to_youtube(youtube, clip_paths, status_path):
+    try:
+        with open(status_path, "r", encoding="utf-8") as file:
+            uploaded = json.load(file)
+    except (FileNotFoundError, json.JSONDecodeError):
+        uploaded = {}
+    results = []
+    for clip_path in clip_paths:
+        clip_path = Path(clip_path)
+        if clip_path.name in uploaded:
+            results.append((clip_path.name, uploaded[clip_path.name], "already uploaded"))
+            continue
+        body = {
+            "snippet": {
+                "title": (clip_path.stem.replace("_", " ") + " #Shorts")[:100],
+                "description": "Created with AI Gaming Shorts Maker.",
+                "categoryId": "20",
+            },
+            "status": {
+                "privacyStatus": "private",
+                "selfDeclaredMadeForKids": False,
+            },
+        }
+        media = MediaFileUpload(str(clip_path), mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True)
+        response = youtube.videos().insert(
+            part="snippet,status", body=body, media_body=media
+        ).execute()
+        video_id = response.get("id")
+        if not video_id:
+            raise RuntimeError(f"{clip_path.name} upload hui, lekin YouTube video ID nahi mila.")
+        uploaded[clip_path.name] = video_id
+        save_json_atomic(status_path, uploaded)
+        results.append((clip_path.name, video_id, "uploaded"))
+    return results
+
+
+handle_youtube_oauth_callback()
+
 
 def save_json_atomic(path, data):
     temp_path = str(path) + ".tmp"
@@ -361,6 +470,37 @@ with st.sidebar:
          "Podcast / Talking", "Education / Tutorial", "Reaction / Comedy", "Other"]
     )
     st.caption("Highlights visual movement, scene changes aur audio activity se rank hote hain. Ye abhi semantic understanding ya custom-trained model nahi hai.")
+    st.divider()
+    st.header("▶️ YouTube channel")
+    oauth_config = youtube_oauth_config()
+    if not oauth_config:
+        st.warning("YouTube connection setup pending hai.")
+        st.caption("Google Cloud OAuth credentials banakar Streamlit Secrets mein [google_oauth] ke andar client_id aur client_secret add karne honge.")
+    elif st.session_state.get("youtube_credentials"):
+        st.success("YouTube account connected")
+        if st.button("Disconnect YouTube", use_container_width=True):
+            st.session_state.pop("youtube_credentials", None)
+            st.session_state.auto_upload_youtube = False
+            st.rerun()
+    else:
+        flow = Flow.from_client_config(oauth_config, scopes=YOUTUBE_UPLOAD_SCOPE)
+        flow.redirect_uri = YOUTUBE_REDIRECT_URI
+        auth_url, oauth_state = flow.authorization_url(
+            access_type="offline", include_granted_scopes="true", prompt="consent"
+        )
+        st.session_state.youtube_oauth_state = oauth_state
+        st.link_button("Connect YouTube with Google", auth_url, use_container_width=True)
+        st.caption("Google sign-in par permission approve karni hogi. Password app ko nahi diya jata.")
+    if st.session_state.get("youtube_oauth_error"):
+        st.error(st.session_state.youtube_oauth_error)
+    youtube_connected = bool(st.session_state.get("youtube_credentials"))
+    auto_upload_youtube = st.checkbox(
+        "New clips automatically upload as Private",
+        value=st.session_state.get("auto_upload_youtube", False),
+        disabled=not youtube_connected,
+        key="auto_upload_youtube",
+        help="Private upload hogi; channel par public nahi dikhegi jab tak tum visibility change na karo."
+    )
 
 if st.session_state.page == "upload":
     st.subheader("1. Upload your gameplay")
@@ -469,12 +609,35 @@ else:
                             selected_path, chosen, clip_seconds, vertical, output_dir
                         )
                         st.success(f"{len(outputs)} clips ready! Progress saved hai.")
+                        if auto_upload_youtube and st.session_state.get("youtube_credentials"):
+                            try:
+                                youtube_service = get_youtube_service()
+                                upload_status = str(job_dir / "youtube_uploads.json")
+                                upload_results = upload_clips_to_youtube(
+                                    youtube_service, outputs, upload_status
+                                )
+                                for clip_name, video_id, status in upload_results:
+                                    st.success(f"{clip_name}: https://www.youtube.com/watch?v={video_id} ({status})")
+                            except Exception as upload_error:
+                                st.error(f"YouTube upload nahi ho paaya: {upload_error}")
                 except Exception as error:
                     st.error(str(error))
 
         # Show already completed clips after a rerun, Back navigation, or app revisit.
         completed = sorted(Path(output_dir).glob("Gaming_Short_*.mp4")) if Path(output_dir).exists() else []
         if completed:
+            if st.session_state.get("youtube_credentials"):
+                if st.button("⬆️ Upload generated clips to YouTube (Private)", use_container_width=True):
+                    try:
+                        youtube_service = get_youtube_service()
+                        upload_status = str(job_dir / "youtube_uploads.json")
+                        upload_results = upload_clips_to_youtube(
+                            youtube_service, completed, upload_status
+                        )
+                        for clip_name, video_id, status in upload_results:
+                            st.success(f"{clip_name}: https://www.youtube.com/watch?v={video_id} ({status})")
+                    except Exception as upload_error:
+                        st.error(f"YouTube upload nahi ho paaya: {upload_error}")
             st.subheader("Your generated Shorts")
             for clip_path in completed:
                 with st.expander(clip_path.name, expanded=False):
