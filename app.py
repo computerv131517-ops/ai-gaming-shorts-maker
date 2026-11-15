@@ -6,6 +6,7 @@ import tempfile
 import zipfile
 import subprocess
 import hashlib
+import json
 from pathlib import Path
 
 import cv2
@@ -75,7 +76,24 @@ def save_uploaded_video(uploaded_file):
     progress.empty()
     return destination
 
-def analyse_video(video_path, clip_seconds, number_of_clips):
+def save_json_atomic(path, data):
+    temp_path = str(path) + ".tmp"
+    with open(temp_path, "w", encoding="utf-8") as file:
+        json.dump(data, file)
+    os.replace(temp_path, path)
+
+def get_job_dir(video_path, clip_seconds, number_of_clips, vertical):
+    digest = hashlib.sha256()
+    with open(video_path, "rb") as source:
+        for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    settings = f"{clip_seconds}|{number_of_clips}|{int(vertical)}"
+    job_id = hashlib.sha256((digest.hexdigest() + settings).encode()).hexdigest()[:20]
+    folder = UPLOAD_DIR / "processing_jobs" / job_id
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+def analyse_video(video_path, clip_seconds, number_of_clips, checkpoint_file):
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise ValueError("Video open nahi ho paayi. MP4 file try karo.")
@@ -95,22 +113,47 @@ def analyse_video(video_path, clip_seconds, number_of_clips):
     previous = None
     scores = []
     score_times = []
-    progress = st.progress(0, text="Gameplay analyse ho raha hai...")
+    next_idx = 0
 
-    for idx, timestamp in enumerate(sample_times):
+    if os.path.exists(checkpoint_file):
+        try:
+            with open(checkpoint_file, "r", encoding="utf-8") as file:
+                saved = json.load(file)
+            next_idx = int(saved.get("next_idx", 0))
+            scores = [float(x) for x in saved.get("scores", [])]
+            score_times = [float(x) for x in saved.get("score_times", [])]
+            previous_data = saved.get("previous")
+            previous = np.array(previous_data, dtype=np.uint8) if previous_data else None
+            next_idx = min(next_idx, len(sample_times))
+            st.info(f"Analysis checkpoint se resume ho raha hai: {next_idx}/{len(sample_times)} samples.")
+        except Exception:
+            next_idx, scores, score_times, previous = 0, [], [], None
+
+    progress = st.progress(min(next_idx / max(len(sample_times), 1), 1.0),
+                           text="Gameplay analysis resume ho raha hai...")
+    for idx in range(next_idx, len(sample_times)):
+        timestamp = sample_times[idx]
         cap.set(cv2.CAP_PROP_POS_MSEC, float(timestamp * 1000))
         ok, frame = cap.read()
-        if not ok:
-            continue
-        small = cv2.resize(frame, (320, 180))
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        if previous is not None:
-            scores.append(float(cv2.absdiff(previous, gray).mean()))
-            score_times.append(float(timestamp))
-        previous = gray
-        if idx % 10 == 0:
+        if ok:
+            small = cv2.resize(frame, (320, 180))
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            if previous is not None:
+                scores.append(float(cv2.absdiff(previous, gray).mean()))
+                score_times.append(float(timestamp))
+            previous = gray
+
+        # Save a checkpoint every 10 samples (about 5 seconds of source video).
+        if (idx + 1) % 10 == 0 or idx == len(sample_times) - 1:
+            save_json_atomic(checkpoint_file, {
+                "next_idx": idx + 1,
+                "scores": scores,
+                "score_times": score_times,
+                "previous": previous.tolist() if previous is not None else None
+            })
+        if idx % 5 == 0 or idx == len(sample_times) - 1:
             progress.progress(min((idx + 1) / len(sample_times), 1.0),
-                              text="Gameplay analyse ho raha hai...")
+                              text=f"Gameplay analyse ho raha hai... {idx + 1}/{len(sample_times)}")
 
     cap.release()
     progress.empty()
@@ -124,34 +167,49 @@ def analyse_video(video_path, clip_seconds, number_of_clips):
     score_array = np.asarray(scores)
     time_array = np.asarray(score_times)
 
-    for start in starts:
-        mask = (time_array >= start) & (time_array < start + clip_seconds)
+    for start_time in starts:
+        mask = (time_array >= start_time) & (time_array < start_time + clip_seconds)
         if np.any(mask):
-            candidates.append((float(score_array[mask].mean()), float(start)))
+            candidates.append((float(score_array[mask].mean()), float(start_time)))
 
     candidates.sort(reverse=True)
     chosen = []
-    for score, start in candidates:
-        end = start + clip_seconds
-        if all(end <= old_start or start >= old_start + clip_seconds
+    for score, start_time in candidates:
+        end_time = start_time + clip_seconds
+        if all(end_time <= old_start or start_time >= old_start + clip_seconds
                for _, old_start in chosen):
-            chosen.append((score, start))
+            chosen.append((score, start_time))
         if len(chosen) >= number_of_clips:
             break
 
+    try:
+        os.remove(checkpoint_file)
+    except FileNotFoundError:
+        pass
     return duration, sorted(chosen, key=lambda item: item[1])
 
 def export_clips(video_path, chosen, clip_seconds, vertical, output_dir):
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    os.makedirs(output_dir, exist_ok=True)
     outputs = []
-    for index, (score, start) in enumerate(chosen, start=1):
+    progress = st.progress(0, text="Clips export ho rahi hain...")
+    for index, (score, start_time) in enumerate(chosen, start=1):
         output_path = os.path.join(output_dir, f"Gaming_Short_{index}.mp4")
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
+            outputs.append(output_path)
+            progress.progress(index / len(chosen),
+                              text=f"Saved clip reuse ho rahi hai... {index}/{len(chosen)}")
+            continue
+
+        # Remove an incomplete file left by an interrupted export.
+        if os.path.exists(output_path):
+            os.remove(output_path)
+
         command = [
-            ffmpeg, "-y", "-ss", f"{start:.3f}", "-i", str(video_path),
+            ffmpeg, "-y", "-ss", f"{start_time:.3f}", "-i", str(video_path),
             "-t", str(clip_seconds), "-map", "0:v:0", "-map", "0:a?"
         ]
         if vertical:
-            # Center-crop to portrait without upscaling the original video.
             command += ["-vf", "crop=w='trunc(min(iw,ih*9/16)/2)*2':h='trunc(ih/2)*2':x=(iw-ow)/2:y=0"]
         command += [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
@@ -163,6 +221,8 @@ def export_clips(video_path, chosen, clip_seconds, vertical, output_dir):
             details = result.stderr[-1800:] if result.stderr else "Unknown FFmpeg error"
             raise RuntimeError(f"Clip {index} export nahi hui:\n{details}")
         outputs.append(output_path)
+        progress.progress(index / len(chosen), text=f"Clips export ho rahi hain... {index}/{len(chosen)}")
+    progress.empty()
     return outputs
 
 with st.sidebar:
@@ -218,56 +278,82 @@ else:
     if selected_path and selected_path.exists():
         st.success(f"Selected video: {selected_path.name}")
         st.video(str(selected_path))
+        job_dir = get_job_dir(selected_path, clip_seconds, number_of_clips, vertical)
+        checkpoint_file = str(job_dir / "analysis_checkpoint.json")
+        analysis_file = job_dir / "analysis.json"
+        output_dir = str(job_dir / "clips")
+        existing_clips = sorted(Path(output_dir).glob("Gaming_Short_*.mp4")) if Path(output_dir).exists() else []
+        has_saved_work = os.path.exists(checkpoint_file) or os.path.exists(analysis_file) or bool(existing_clips)
+
+        if has_saved_work:
+            st.info(f"Saved progress found. {len(existing_clips)} completed clip(s) are already محفوظ.")
         col1, col2 = st.columns(2)
         with col1:
             if st.button("← Back to Uploads", use_container_width=True):
                 st.session_state.page = "upload"
                 st.rerun()
         with col2:
-            if st.button("🚀 Start Processing", type="primary", use_container_width=True):
-                with tempfile.TemporaryDirectory() as work_dir:
-                    try:
-                        duration, chosen = analyse_video(selected_path, clip_seconds, number_of_clips)
+            button_text = "▶️ Resume Processing" if has_saved_work else "🚀 Start Processing"
+            if st.button(button_text, type="primary", use_container_width=True):
+                try:
+                    if os.path.exists(analysis_file):
+                        with open(analysis_file, "r", encoding="utf-8") as file:
+                            saved_analysis = json.load(file)
+                        duration = float(saved_analysis["duration"])
+                        chosen = [(float(item[0]), float(item[1])) for item in saved_analysis["chosen"]]
+                        st.success("Saved analysis loaded. Analysis dobara nahi chalegi.")
+                    else:
+                        duration, chosen = analyse_video(
+                            selected_path, clip_seconds, number_of_clips, checkpoint_file
+                        )
                         if not chosen:
                             st.error("Is video mein selected length ke clips nahi mil paaye.")
                         else:
-                            st.subheader("⭐ Selected gameplay moments")
-                            for i, (score, start) in enumerate(chosen, 1):
-                                st.write(f"**Clip {i}:** {start:.1f}s – {start + clip_seconds:.1f}s · Movement score: {score:.2f}")
+                            save_json_atomic(analysis_file, {
+                                "duration": duration,
+                                "chosen": [[score, start_time] for score, start_time in chosen]
+                            })
+                    if chosen:
+                        st.subheader("⭐ Selected gameplay moments")
+                        for i, (score, start_time) in enumerate(chosen, 1):
+                            st.write(f"**Clip {i}:** {start_time:.1f}s – {start_time + clip_seconds:.1f}s · Movement score: {score:.2f}")
+                        outputs = export_clips(
+                            selected_path, chosen, clip_seconds, vertical, output_dir
+                        )
+                        st.success(f"{len(outputs)} clips ready! Progress saved hai.")
+                except Exception as error:
+                    st.error(str(error))
 
-                            with st.spinner("Clips export ho rahi hain. Audio include hoga..."):
-                                output_dir = os.path.join(work_dir, "clips")
-                                os.makedirs(output_dir, exist_ok=True)
-                                outputs = export_clips(selected_path, chosen, clip_seconds, vertical, output_dir)
+        # Show already completed clips after a rerun, Back navigation, or app revisit.
+        completed = sorted(Path(output_dir).glob("Gaming_Short_*.mp4")) if Path(output_dir).exists() else []
+        if completed:
+            st.subheader("Your generated Shorts")
+            for clip_path in completed:
+                with st.expander(clip_path.name, expanded=False):
+                    st.video(str(clip_path))
+                    with open(clip_path, "rb") as file:
+                        st.download_button(
+                            f"Download {clip_path.name}",
+                            data=file.read(),
+                            file_name=clip_path.name,
+                            mime="video/mp4",
+                            key=f"download_{job_dir.name}_{clip_path.name}"
+                        )
 
-                            st.success(f"{len(outputs)} clips ready! Original uploaded file unchanged hai.")
-                            for path in outputs:
-                                with st.expander(Path(path).name):
-                                    st.video(path)
-                                    with open(path, "rb") as file:
-                                        st.download_button(
-                                            f"Download {Path(path).name}",
-                                            data=file.read(),
-                                            file_name=Path(path).name,
-                                            mime="video/mp4",
-                                            key=Path(path).name
-                                        )
-
-                            zip_path = os.path.join(work_dir, "Gaming_Shorts.zip")
-                            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
-                                for path in outputs:
-                                    archive.write(path, arcname=Path(path).name)
-                            with open(zip_path, "rb") as file:
-                                st.download_button(
-                                    "⬇️ Download all clips (ZIP)",
-                                    data=file.read(),
-                                    file_name="Gaming_Shorts.zip",
-                                    mime="application/zip",
-                                    type="primary",
-                                    use_container_width=True
-                                )
-                    except Exception as error:
-                        st.error(str(error))
+            zip_path = job_dir / "Gaming_Shorts.zip"
+            if len(completed) > 1:
+                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+                    for clip_path in completed:
+                        archive.write(clip_path, arcname=clip_path.name)
+                with open(zip_path, "rb") as file:
+                    st.download_button(
+                        "⬇️ Download all completed clips (ZIP)",
+                        data=file.read(),
+                        file_name="Gaming_Shorts.zip",
+                        mime="application/zip",
+                        type="primary",
+                        use_container_width=True
+                    )
     else:
         st.warning("Selected video nahi mil rahi. Upload page par wapas jaakar video dobara save karo.")
         if st.button("← Back to Uploads"):
@@ -297,13 +383,13 @@ if st.session_state.show_update_history:
     st.markdown("""
     **Latest update — 15 Nov 2026**
 
-    - Added **Save Video Only**: uploading no longer starts video processing.
-    - Added a saved-videos list and a separate **Continue to Processing** step.
-    - Added **Back to Uploads** navigation.
-    - Original uploaded file is saved without upload-time compression.
-    - Improved clip export quality settings and reduced unnecessary upscaling in vertical crop.
+    - Added **Save Video Only** and separate processing controls.
+    - Added **Resume Processing** with saved analysis checkpoints.
+    - Completed clips are saved individually; returning to the page reuses finished clips.
+    - Interrupted analysis resumes from its latest checkpoint; interrupted clip export retries only the unfinished clip.
+    - Original uploaded file remains unchanged.
 
-    **Git commit message:** `Add updates button and commit history`
+    **Git commit message:** `Add resumable processing checkpoints`
 
-    **Previous feature commit:** `fdb09cb5c69d33171420c0cc1d765bc22c6640f2`
+    **Previous feature commit:** `af4c311ee1a4fb3f69120391f97992112589d1cd`
     """)
