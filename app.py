@@ -8,6 +8,8 @@ import subprocess
 import hashlib
 import json
 from pathlib import Path
+from urllib.parse import urlparse
+import yt_dlp
 
 import cv2
 import numpy as np
@@ -91,6 +93,52 @@ def save_uploaded_video(uploaded_file):
                               text="Saving original video without compression...")
     progress.empty()
     return destination
+
+def download_video_from_url(video_url):
+    """Download a public video from supported sites; never use login/cookies or bypass access controls."""
+    parsed = urlparse(video_url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Valid public http/https video link paste karo.")
+
+    host = parsed.hostname.lower().split(":")[0]
+    allowed_domains = (
+        "youtube.com", "youtu.be", "vimeo.com", "dailymotion.com",
+        "twitch.tv", "streamable.com"
+    )
+    if not any(host == domain or host.endswith("." + domain) for domain in allowed_domains):
+        raise ValueError(
+            "Abhi supported sites: YouTube, Vimeo, Dailymotion, Twitch aur Streamable. "
+            "Private, login-only, paywalled ya DRM-protected videos supported nahi hain."
+        )
+
+    url_hash = hashlib.sha256(video_url.strip().encode("utf-8")).hexdigest()[:12]
+    output_template = str(UPLOAD_DIR / f"url_{url_hash}.%(ext)s")
+    options = {
+        "format": "best[ext=mp4]/best",
+        "outtmpl": output_template,
+        "noplaylist": True,
+        "max_filesize": 1024 * 1024 * 1024,
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+        "restrictfilenames": True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(options) as downloader:
+            info = downloader.extract_info(video_url.strip(), download=True)
+            downloaded = Path(downloader.prepare_filename(info))
+        if not downloaded.exists():
+            mp4_path = downloaded.with_suffix(".mp4")
+            if mp4_path.exists():
+                downloaded = mp4_path
+        if not downloaded.exists() or downloaded.stat().st_size == 0:
+            raise RuntimeError("Video download complete nahi hui. Link public aur supported hona chahiye.")
+        return downloaded
+    except Exception as error:
+        raise RuntimeError(
+            "Video fetch nahi ho paayi. Link check karo; kuch sites download ko restrict karti hain "
+            "ya format change kar deti hain. Details: " + str(error)[:500]
+        ) from error
 
 def save_json_atomic(path, data):
     temp_path = str(path) + ".tmp"
@@ -320,6 +368,23 @@ if st.session_state.page == "upload":
             except Exception as error:
                 st.error(f"Video save nahi ho paayi: {error}")
 
+    st.divider()
+    st.subheader("Or paste a public video link")
+    st.caption("Supported: YouTube, Vimeo, Dailymotion, Twitch and Streamable. Only public videos that you have permission to use.")
+    video_url = st.text_input("Video URL", placeholder="https://...")
+    if st.button("🌐 Fetch Video from Link", use_container_width=True):
+        if not video_url.strip():
+            st.warning("Pehle video link paste karo.")
+        else:
+            try:
+                with st.spinner("Public video fetch ho rahi hai..."):
+                    linked_path = download_video_from_url(video_url)
+                st.session_state.selected_video = str(linked_path)
+                st.success("Video fetch ho gayi. Ab Continue to Processing dabao.")
+                st.video(str(linked_path))
+            except Exception as error:
+                st.error(str(error))
+
     saved_videos = list_saved_videos()
     if saved_videos:
         st.divider()
@@ -450,7 +515,7 @@ if st.button("🆕 Updates & Commit History", use_container_width=True):
 if st.session_state.show_update_history:
     st.markdown("### Website updates")
     st.markdown("""
-    **Latest update — 15 Nov 2026**
+    **Latest update — 15 Nov 2026**\n\n    - Added public video URL fetching for supported platforms (YouTube, Vimeo, Dailymotion, Twitch and Streamable); link fetching does not start clipping automatically.
 
     - Added category-aware highlight ranking for gaming, sports, vlog/travel, podcast/talking, education/tutorial, reaction/comedy and other videos.
     - Highlight scoring combines visual movement, scene changes and audio activity.
@@ -458,7 +523,7 @@ if st.session_state.show_update_history:
     - 9:16 output uses full-frame fit with black background; no cropping.
     - Added resumable analysis checkpoints and reuse of completed clips.
 
-    **Git commit message:** `Add category-aware multi-signal highlight detection`
+    **Git commit message:** `Add public video URL import`\n\n    **Previous feature commit:** `Add category-aware multi-signal highlight detection`
 
     **Previous feature commit:** `67f028b763fa1b415b1b9d74c49f86f9f56a9968`
     """)
