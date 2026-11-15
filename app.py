@@ -118,6 +118,9 @@ def download_video_from_url(video_url):
         "noplaylist": True,
         "max_filesize": 1024 * 1024 * 1024,
         "merge_output_format": "mp4",
+        # yt-dlp needs an ffmpeg executable to merge separate video/audio streams.
+        # imageio-ffmpeg is already a project dependency and supplies its path.
+        "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
         "quiet": True,
         "no_warnings": True,
         "restrictfilenames": True,
