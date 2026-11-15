@@ -239,7 +239,90 @@ def get_youtube_service():
     return build("youtube", "v3", credentials=credentials, cache_discovery=False)
 
 
-def upload_clips_to_youtube(youtube, clip_paths, status_path):
+def get_gemini_api_key():
+    try:
+        return st.secrets.get('gemini', {}).get('api_key', '') or st.secrets.get('GEMINI_API_KEY', '')
+    except Exception:
+        return os.environ.get('GEMINI_API_KEY', '')
+
+
+def load_video_metadata(job_dir):
+    try:
+        with open(Path(job_dir) / 'video_metadata.json', 'r', encoding='utf-8') as file:
+            return json.load(file)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def generate_video_metadata(video_path, job_dir, category):
+    existing = load_video_metadata(job_dir)
+    if existing:
+        return existing
+    api_key = get_gemini_api_key()
+    if not api_key:
+        return None
+    from google import genai
+    client = genai.Client(api_key=api_key)
+    uploaded_file = None
+    try:
+        st.info('AI poori original video analyse karke common metadata bana raha hai. Ismein kuch waqt lag sakta hai.')
+        uploaded_file = client.files.upload(file=str(video_path))
+        started = time.time()
+        while not uploaded_file.state or uploaded_file.state.name != 'ACTIVE':
+            if uploaded_file.state and uploaded_file.state.name == 'FAILED':
+                raise RuntimeError('Gemini video processing fail ho gayi.')
+            if time.time() - started > 1800:
+                raise TimeoutError('Video analysis 30 minutes se zyada le rahi hai. Dobara try karo.')
+            time.sleep(5)
+            uploaded_file = client.files.get(name=uploaded_file.name)
+        prompt = '''Analyze the ENTIRE uploaded video, including visual scenes and available audio context.
+Selected category: CATEGORY_PLACEHOLDER.
+Create ONE shared metadata set for all Shorts cut from this source video.
+Return ONLY valid JSON with keys title, description, hashtags.
+title: catchy, accurate YouTube Shorts title, max 95 characters.
+description: engaging 2-4 sentence summary; do not invent events, names, scores or claims.
+hashtags: array of 5-8 relevant hashtags, each starting with #. Include #Shorts.
+If the subject/game is unclear, stay general and accurate.'''
+        response = client.models.generate_content(model='gemini-3.8-flash', contents=[uploaded_file, prompt])
+        raw = (response.text or '').strip()
+        if raw.startswith('```'):
+            raw = raw.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
+            if raw.lower().startswith('json'):
+                raw = raw[4:].strip()
+        data = json.loads(raw)
+        title = str(data.get('title', '')).strip()[:95]
+        description = str(data.get('description', '')).strip()
+        tags = data.get('hashtags', [])
+        if isinstance(tags, str):
+            tags = tags.split()
+        tags = [str(tag).strip() for tag in tags if str(tag).strip()]
+        tags = [tag if tag.startswith('#') else '#' + tag.lstrip('#') for tag in tags[:8]]
+        if not title or not description or not tags:
+            raise ValueError('AI response mein title, description ya hashtags missing hain.')
+        metadata = {'title': title, 'description': description, 'hashtags': tags}
+        save_json_atomic(Path(job_dir) / 'video_metadata.json', metadata)
+        return metadata
+    finally:
+        if uploaded_file is not None:
+            try:
+                client.files.delete(name=uploaded_file.name)
+            except Exception:
+                pass
+
+
+def show_video_metadata(metadata):
+    if not metadata:
+        return
+    st.markdown('### ✨ AI-generated common YouTube metadata')
+    st.caption('Ek hi metadata set is original video ki sabhi generated clips ke liye hai.')
+    st.markdown('**Title**')
+    st.code(metadata.get('title', ''))
+    st.markdown('**Description**')
+    st.code(metadata.get('description', ''))
+    st.markdown('**Hashtags**')
+    st.code(' '.join(metadata.get('hashtags', [])))
+
+def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
     try:
         with open(status_path, "r", encoding="utf-8") as file:
             uploaded = json.load(file)
@@ -253,8 +336,8 @@ def upload_clips_to_youtube(youtube, clip_paths, status_path):
             continue
         body = {
             "snippet": {
-                "title": (clip_path.stem.replace("_", " ") + " #Shorts")[:100],
-                "description": "Created with AI Gaming Shorts Maker.",
+                "title": ((metadata or {}).get("title") or (clip_path.stem.replace("_", " ") + " #Shorts"))[:100],
+                "description": (((metadata or {}).get("description") or "Created with AI Gaming Shorts Maker.") + "\n\n" + " ".join((metadata or {}).get("hashtags", [])))[:5000],
                 "categoryId": "20",
             },
             "status": {
@@ -573,6 +656,7 @@ if st.session_state.page == "history":
             clips = item["clips"]
             minutes_left = max(0, int((item["expires_at"] - time.time()) / 60))
             with st.expander(f"{job_dir.name} · {len(clips)} clips · approx. {minutes_left} min left", expanded=True):
+                show_video_metadata(load_video_metadata(job_dir))
                 for clip_path in clips:
                     st.write(f"**{clip_path.name}**")
                     st.video(str(clip_path))
@@ -713,12 +797,20 @@ else:
                             selected_path, chosen, clip_seconds, vertical, output_dir
                         )
                         st.success(f"{len(outputs)} clips ready! Progress saved hai.")
+                        try:
+                            video_metadata = generate_video_metadata(selected_path, job_dir, category)
+                            if video_metadata:
+                                show_video_metadata(video_metadata)
+                            else:
+                                st.info("AI metadata ke liye Streamlit Secrets mein Gemini API key add karo. Clipping bina iske bhi chalegi.")
+                        except Exception as metadata_error:
+                            st.warning(f"AI metadata generate nahi ho paaya: {metadata_error}")
                         if auto_upload_youtube and st.session_state.get("youtube_credentials"):
                             try:
                                 youtube_service = get_youtube_service()
                                 upload_status = str(job_dir / "youtube_uploads.json")
                                 upload_results = upload_clips_to_youtube(
-                                    youtube_service, outputs, upload_status
+                                    youtube_service, outputs, upload_status, load_video_metadata(job_dir)
                                 )
                                 for clip_name, video_id, status in upload_results:
                                     st.success(f"{clip_name}: https://www.youtube.com/watch?v={video_id} ({status})")
@@ -736,13 +828,14 @@ else:
                         youtube_service = get_youtube_service()
                         upload_status = str(job_dir / "youtube_uploads.json")
                         upload_results = upload_clips_to_youtube(
-                            youtube_service, completed, upload_status
+                            youtube_service, completed, upload_status, load_video_metadata(job_dir)
                         )
                         for clip_name, video_id, status in upload_results:
                             st.success(f"{clip_name}: https://www.youtube.com/watch?v={video_id} ({status})")
                     except Exception as upload_error:
                         st.error(f"YouTube upload nahi ho paaya: {upload_error}")
             st.subheader("Your generated Shorts")
+            show_video_metadata(load_video_metadata(job_dir))
             for clip_path in completed:
                 with st.expander(clip_path.name, expanded=False):
                     st.video(str(clip_path))
@@ -840,7 +933,7 @@ if st.session_state.show_update_history:
 
     - Added Google OAuth connection for YouTube and private uploads of generated Shorts; automatic uploads are opt-in.
 
-    - Added category-aware highlight ranking for gaming, sports, vlog/travel, podcast/talking, education/tutorial, reaction/comedy and other videos.
+    - Added full-video AI analysis for one shared YouTube title, description and hashtags across all clips (Gemini API key required in Streamlit Secrets).\n    - Added category-aware highlight ranking for gaming, sports, vlog/travel, podcast/talking, education/tutorial, reaction/comedy and other videos.
     - Highlight scoring combines visual movement, scene changes and audio activity.
     - Original source video is deleted after the first generated clip or ZIP download. Generated clips appear in Clip History for 1 hour with individual and ZIP download options, then are cleaned up when history is checked.
     - 9:16 output uses full-frame fit with black background; no cropping.
