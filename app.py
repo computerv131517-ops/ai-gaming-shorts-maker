@@ -44,7 +44,23 @@ if "page" not in st.session_state:
 if "selected_video" not in st.session_state:
     st.session_state.selected_video = ""
 
+UPLOAD_RETENTION_SECONDS = 60 * 60  # Automatically remove saved source videos after 1 hour.
+
+def cleanup_expired_uploads():
+    now = time.time()
+    video_extensions = {".mp4", ".mov", ".mkv", ".avi"}
+    for path in UPLOAD_DIR.iterdir():
+        if path.is_file() and path.suffix.lower() in video_extensions:
+            try:
+                if now - path.stat().st_mtime >= UPLOAD_RETENTION_SECONDS:
+                    path.unlink()
+                    if st.session_state.get("selected_video") == str(path):
+                        st.session_state.selected_video = ""
+            except FileNotFoundError:
+                pass
+
 def list_saved_videos():
+    cleanup_expired_uploads()
     return sorted(
         [p for p in UPLOAD_DIR.iterdir() if p.is_file() and p.suffix.lower() in
          {".mp4", ".mov", ".mkv", ".avi"}],
@@ -367,7 +383,8 @@ st.caption(
     "Upload ke waqt original video bytes save hote hain; upload par compression nahi hoti. "
     "Generated clips re-encode hoti hain, isliye output bilkul bit-for-bit original nahi hota. "
     "Vertical Shorts ke liye center crop hota hai. Streamlit Cloud ka local storage temporary hai; "
-    "app restart/sleep ke baad saved uploads rehne ki guarantee nahi hai. "
+    "saved source videos upload list check hone par 1 hour ke baad automatically delete ho jati hain; "
+    "cleanup app activity par hota hai, exact minute par background timer nahi chalta. "
     "Large files upload hone mein internet speed aur hosting limits ka asar padega."
 )
 st.caption("Sirf apne ya permission wale gameplay videos upload karo. Free hosting par bade videos process hone mein waqt lag sakta hai.")
@@ -385,13 +402,13 @@ if st.session_state.show_update_history:
     st.markdown("""
     **Latest update — 15 Nov 2026**
 
-    - Changed 9:16 output to **Fit / No Crop**.
-    - Entire original frame stays visible; extra canvas space is filled with black.
+    - Saved source videos are automatically removed after 1 hour when the app next checks the upload list.
+    - Changed 9:16 output to **Fit / No Crop** with black background.
     - Added **Resume Processing** with saved analysis checkpoints.
     - Completed clips are saved individually; returning to the page reuses finished clips.
-    - Original uploaded file remains unchanged.
+    - Original uploaded file remains unchanged until automatic expiry.
 
-    **Git commit message:** `Use fit-to-frame 9:16 output with black background`
+    **Git commit message:** `Delete saved source videos after one hour`
 
-    **Previous feature commit:** `0817307c4383ba59f84c62e8fbb53891e74c474a`
+    **Previous feature commit:** `e147de473aa82e1cbac52016766e36d522584a3a`
     """)
