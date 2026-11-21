@@ -833,6 +833,10 @@ If no genuinely strong moments exist, return {{"highlights":[],"captions":[]}}.
             return chosen
         st.warning("Gemini ko clear complete highlights nahi mile; visual/audio detection fallback use hogi.")
         return None
+    except Exception as error:
+        if "ai_status" in locals():
+            ai_status.update(label=f"⚠️ Gemini highlight analysis request fail hui: {str(error)[:220]}", state="error")
+        raise
     finally:
         if uploaded_file is not None:
             try:
