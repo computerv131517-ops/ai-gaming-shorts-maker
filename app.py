@@ -1042,22 +1042,29 @@ def export_clips(video_path, chosen, vertical, output_dir, captions_path=None):
         ]
         if has_audio:
             command += ["-i", str(whoosh_path)]
-        command += [
-            "-t", f"{clip_duration:.3f}",
-            "-filter_complex",
-            f"[0:v]{video_filter}[basev];[basev][1:v]overlay=0:0:shortest=1[vout]"
-        ]
+        command += ["-t", f"{clip_duration:.3f}"]
+
+        def build_filter_graph(active_video_filter):
+            video_graph = (
+                f"[0:v]{active_video_filter}[basev];"
+                "[basev][1:v]overlay=0:0:shortest=1[vout]"
+            )
+            if has_audio:
+                return (
+                    video_graph + ";"
+                    "[0:a]loudnorm=I=-16:TP=-1.5:LRA=11[basea];"
+                    "[2:a]volume=0.18,adelay=120|120[fx];"
+                    "[basea][fx]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+                )
+            return video_graph
+
+        command += ["-filter_complex", build_filter_graph(video_filter),
+                    "-map", "[vout]"]
         if has_audio:
-            command += [
-                "-filter_complex",
-                f"[0:v]{video_filter}[basev];[basev][1:v]overlay=0:0:shortest=1[vout];"
-                "[0:a]loudnorm=I=-16:TP=-1.5:LRA=11[basea];"
-                "[2:a]volume=0.18,adelay=120|120[fx];"
-                "[basea][fx]amix=inputs=2:duration=first:dropout_transition=0[aout]",
-                "-map", "[vout]", "-map", "[aout]"
-            ]
+            command += ["-map", "[aout]"]
         else:
-            command += ["-map", "[vout]", "-an"]
+            command += ["-an"]
+
         command += [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
             "-pix_fmt", "yuv420p"
@@ -1069,7 +1076,7 @@ def export_clips(video_path, chosen, vertical, output_dir, captions_path=None):
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode != 0 and has_captions:
             fallback_filter = video_filter.split(",subtitles=", 1)[0]
-            command[command.index("-vf") + 1] = fallback_filter
+            command[command.index("-filter_complex") + 1] = build_filter_graph(fallback_filter)
             result = subprocess.run(command, capture_output=True, text=True)
             if result.returncode == 0:
                 st.warning(f"Clip {index}: FFmpeg captions support unavailable; other edits applied.")
