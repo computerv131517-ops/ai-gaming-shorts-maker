@@ -192,6 +192,23 @@ def fetch_background_status(job_id):
     return response.json()
 
 
+def download_background_thumbnails(job_id, thumbnail_paths):
+    config = background_config()
+    target_dir = UPLOAD_DIR / "background_jobs" / job_id / "thumbnails"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    downloaded = []
+    for remote_path in thumbnail_paths:
+        name = Path(remote_path).name
+        destination = target_dir / name
+        if not destination.exists():
+            url = config["supabase_url"] + f"/storage/v1/object/authenticated/gaming-videos/jobs/{job_id}/thumbnails/{name}"
+            response = requests.get(url, headers=background_headers(config), timeout=(30, 180))
+            response.raise_for_status()
+            destination.write_bytes(response.content)
+        downloaded.append(destination)
+    return downloaded
+
+
 def download_background_clips(job_id, clip_paths):
     config = background_config()
     target_dir = UPLOAD_DIR / "background_jobs" / job_id / "clips"
@@ -1737,6 +1754,9 @@ else:
                         st.session_state.background_clip_paths = [str(p) for p in paths]
                         local_clips = download_background_clips(bg_job_id, paths)
                         st.session_state.background_local_clips = [str(p) for p in local_clips]
+                        thumbnail_paths = bg_status.get("thumbnail_paths", [])
+                        local_thumbnails = download_background_thumbnails(bg_job_id, thumbnail_paths)
+                        st.session_state.background_local_thumbnails = [str(p) for p in local_thumbnails]
                 except Exception as status_error:
                     st.error(f"Status/result fetch nahi ho paaya: {str(status_error)[:500]}")
             bg_status = st.session_state.get("background_job_status", {})
@@ -1760,6 +1780,17 @@ else:
                     features = bg_status.get("editing_features", [])
                     if features:
                         st.caption("Editing applied: " + " · ".join(features))
+                    for thumbnail_string in st.session_state.get("background_local_thumbnails", []):
+                        thumbnail_path = Path(thumbnail_string)
+                        if thumbnail_path.exists():
+                            st.image(str(thumbnail_path), caption=f"AI Thumbnail · {thumbnail_path.name}", use_container_width=True)
+                            st.download_button(
+                                f"⬇️ Download {thumbnail_path.name}",
+                                data=thumbnail_path.read_bytes(),
+                                file_name=thumbnail_path.name,
+                                mime="image/jpeg",
+                                key=f"bg_thumbnail_{bg_job_id}_{thumbnail_path.name}"
+                            )
                     for clip_string in st.session_state.get("background_local_clips", []):
                         clip_path = Path(clip_string)
                         if clip_path.exists():
