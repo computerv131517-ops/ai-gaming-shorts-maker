@@ -10,6 +10,7 @@ import subprocess
 import hashlib
 import hmac
 import secrets
+import random
 import json
 from pathlib import Path
 from urllib.parse import urlparse
@@ -433,7 +434,7 @@ def show_video_metadata(metadata):
     st.code(' '.join(metadata.get('hashtags', [])))
 
 def get_next_youtube_publish_time(youtube):
-    """Continue after the latest scheduled upload on this channel."""
+    """Continue the channel-wide queue, with a random 3.5–5 hour interval."""
     now = datetime.now(timezone.utc)
     latest_future = None
     channel_response = youtube.channels().list(
@@ -465,21 +466,101 @@ def get_next_youtube_publish_time(youtube):
                     if not publish_at:
                         continue
                     try:
-                        scheduled = datetime.fromisoformat(
-                            publish_at.replace("Z", "+00:00")
-                        )
+                        scheduled = datetime.fromisoformat(publish_at.replace("Z", "+00:00"))
                     except ValueError:
                         continue
-                    if scheduled > now and (
-                        latest_future is None or scheduled > latest_future
-                    ):
+                    if scheduled > now and (latest_future is None or scheduled > latest_future):
                         latest_future = scheduled
             page_token = page.get("nextPageToken")
             if not page_token:
                 break
-    # First new Short goes out 3.5 hours from now. New batches continue
-    # 3.5 hours after the latest future scheduled upload already on the channel.
-    return (latest_future if latest_future and latest_future > now else now) + timedelta(hours=3, minutes=30)
+
+    # Keep one shared queue across different source videos/jobs on this app instance.
+    queue_path = UPLOAD_DIR / "youtube_global_queue.json"
+    try:
+        with open(queue_path, "r", encoding="utf-8") as file:
+            queue_data = json.load(file)
+        saved_last = datetime.fromisoformat(queue_data["last_publish_at"].replace("Z", "+00:00"))
+        if saved_last > now and (latest_future is None or saved_last > latest_future):
+            latest_future = saved_last
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        pass
+
+    base = latest_future if latest_future and latest_future > now else now
+    return base + timedelta(minutes=random.randint(210, 300))
+
+
+def generate_ai_thumbnail(clip_path, job_dir, title_hint=""):
+    """Generate a 16:9 AI thumbnail using a representative frame from this clip."""
+    api_key = get_gemini_api_key()
+    if not api_key:
+        return None
+    thumbnail_dir = Path(job_dir) / "thumbnails"
+    thumbnail_dir.mkdir(parents=True, exist_ok=True)
+    thumbnail_path = thumbnail_dir / (Path(clip_path).stem + "_ai.jpg")
+    if thumbnail_path.is_file() and thumbnail_path.stat().st_size > 2048:
+        return thumbnail_path
+
+    capture = cv2.VideoCapture(str(clip_path))
+    if not capture.isOpened():
+        return None
+    frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    capture.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(frame_count * 0.45)))
+    ok, frame = capture.read()
+    capture.release()
+    if not ok:
+        return None
+    frame = cv2.resize(frame, (960, 540), interpolation=cv2.INTER_AREA)
+    ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    if not ok:
+        return None
+
+    from google import genai
+    from google.genai import types
+    client = genai.Client(api_key=api_key)
+    prompt = (
+        "Create a polished, highly clickable YouTube gaming video thumbnail in 16:9 landscape. "
+        "Use the supplied gameplay frame as the visual reference for the same game scene and mood. "
+        "Make the central action clear, cinematic, vibrant, high contrast, crisp and professional. "
+        "Do not add logos, watermarks, fake characters, fake game UI, or any text/letters. "
+        "Do not misrepresent the event. Thumbnail context/title: " + str(title_hint)[:180]
+    )
+    response = client.models.generate_content(
+        model="gemini-3.1-flash-image",
+        contents=[
+            prompt,
+            types.Part.from_bytes(data=encoded.tobytes(), mime_type="image/jpeg"),
+        ],
+        config=types.GenerateContentConfig(
+            response_modalities=["IMAGE"],
+            image_config=types.ImageConfig(aspect_ratio="16:9", image_size="1K"),
+        ),
+    )
+    for part in response.parts:
+        if getattr(part, "inline_data", None):
+            generated = part.as_image()
+            generated.save(str(thumbnail_path))
+            if thumbnail_path.is_file() and thumbnail_path.stat().st_size > 2048:
+                return thumbnail_path
+    return None
+
+
+def apply_youtube_thumbnail(youtube, video_id, clip_path, job_dir, title_hint=""):
+    """Try to generate and set a custom thumbnail; upload remains valid if this step fails."""
+    try:
+        thumbnail_path = generate_ai_thumbnail(clip_path, job_dir, title_hint)
+        if thumbnail_path:
+            youtube.thumbnails().set(
+                videoId=video_id,
+                media_body=MediaFileUpload(str(thumbnail_path), mimetype="image/jpeg")
+            ).execute()
+            return True
+    except Exception as thumbnail_error:
+        st.warning(
+            "Video upload ho gayi, lekin AI thumbnail set nahi ho paaya: "
+            + str(thumbnail_error)[:240]
+        )
+    return False
 
 
 def upload_clip_now_to_youtube(youtube, clip_path, status_path, metadata=None):
@@ -541,7 +622,7 @@ def upload_clip_now_to_youtube(youtube, clip_path, status_path, metadata=None):
 
 
 def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
-    """Upload clips and schedule each one 3.5 hours after the previous slot."""
+    """Upload at most two pending clips per run and leave the rest queued locally."""
     try:
         with open(status_path, "r", encoding="utf-8") as file:
             uploaded = json.load(file)
@@ -550,52 +631,50 @@ def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         uploaded = {}
 
-    results = []
-    total_clips = len(clip_paths)
-    if total_clips == 0:
-        st.info("Upload ke liye koi clip nahi mili.")
-        return results
+    pending = []
+    for candidate in clip_paths:
+        candidate = Path(candidate)
+        saved = uploaded.get(candidate.name)
+        saved_id = saved.get("video_id") if isinstance(saved, dict) else saved
+        if candidate.is_file() and not saved_id:
+            pending.append(candidate)
 
-    status_box = st.status("⏳ YouTube par clips upload aur schedule ho rahi hain...", expanded=True)
-    progress = st.progress(0, text=f"Scheduling starting · 0/{total_clips} clips")
+    if not pending:
+        st.info("Queue mein koi pending clip nahi hai.")
+        return []
+
+    batch = pending[:2]
+    remaining = max(0, len(pending) - len(batch))
+    results = []
+    status_box = st.status(
+        f"⏳ Is batch mein {len(batch)} tak videos upload/schedule hongi...",
+        expanded=True
+    )
+    progress = st.progress(0, text=f"Queue batch · 0/{len(batch)}")
     upload_started = time.time()
     try:
         next_publish = get_next_youtube_publish_time(youtube)
         status_box.write(
-            f"📅 First available slot: {next_publish.astimezone(ZoneInfo('Asia/Kolkata')).strftime('%d %b %Y, %I:%M %p IST')}"
+            f"📅 First slot: {next_publish.astimezone(ZoneInfo('Asia/Kolkata')).strftime('%d %b %Y, %I:%M %p IST')}"
         )
-        for index, clip_path in enumerate(clip_paths, start=1):
-            clip_path = Path(clip_path)
+        for index, clip_path in enumerate(batch, start=1):
             if not clip_path.is_file() or clip_path.stat().st_size == 0:
                 raise RuntimeError(f"{clip_path.name} missing hai ya empty hai.")
 
-            if clip_path.name in uploaded:
-                saved = uploaded[clip_path.name]
-                video_id = saved.get("video_id") if isinstance(saved, dict) else saved
-                results.append((clip_path.name, video_id, "already uploaded"))
-                status_box.write(f"✅ **{clip_path.name}** — Pehle se YouTube par upload ho chuki hai.")
-                if video_id:
-                    status_box.write(f"https://www.youtube.com/watch?v={video_id}")
-                progress.progress(index / total_clips,
-                                  text=f"Completed · {index}/{total_clips} clips")
-                continue
-
             publish_at = next_publish.isoformat(timespec="seconds").replace("+00:00", "Z")
             local_slot = next_publish.astimezone(ZoneInfo("Asia/Kolkata")).strftime("%d %b %Y, %I:%M %p IST")
-            status_box.write(f"🔄 **{clip_path.name}** — Upload ho rahi hai; publish slot: **{local_slot}**")
+            meta = metadata or {}
             body = {
                 "snippet": {
-                    "title": ((metadata or {}).get("title") or
-                              (clip_path.stem.replace("_", " ") + " #Shorts"))[:100],
+                    "title": (meta.get("title") or clip_path.stem.replace("_", " ") + " #Shorts")[:100],
                     "description": (
-                        ((metadata or {}).get("description") or
-                         "Created with AI Gaming Shorts Maker.") + "\n\n" +
-                        " ".join((metadata or {}).get("hashtags", []))
+                        (meta.get("description") or "Created with AI Gaming Shorts Maker.")
+                        + "\n\n" + " ".join(meta.get("hashtags", []))
                     )[:5000],
                     "categoryId": "20",
                     "tags": [
                         str(tag).strip().lstrip("#")
-                        for tag in ((metadata or {}).get("hashtags", []) or [])
+                        for tag in (meta.get("hashtags", []) or [])
                         if str(tag).strip()
                     ][:30],
                 },
@@ -606,6 +685,7 @@ def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
                 },
             }
 
+            status_box.write(f"🔄 **{clip_path.name}** — Upload ho rahi hai; publish slot: **{local_slot}**")
             media = MediaFileUpload(
                 str(clip_path), mimetype="video/mp4",
                 chunksize=8 * 1024 * 1024, resumable=True
@@ -613,47 +693,70 @@ def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
             request = youtube.videos().insert(
                 part="snippet,status", body=body, media_body=media
             )
-
             response = None
             while response is None:
                 chunk_status, response = request.next_chunk(num_retries=3)
                 if chunk_status is not None:
-                    clip_percent = int(chunk_status.progress() * 100)
-                    overall_progress = (
-                        (index - 1) + float(chunk_status.progress())
-                    ) / total_clips
+                    fraction = ((index - 1) + float(chunk_status.progress())) / len(batch)
                     elapsed = time.time() - upload_started
-                    eta = (elapsed / max(overall_progress, 0.01)) * (1 - overall_progress)
+                    eta = (elapsed / max(fraction, 0.01)) * (1 - fraction)
                     progress.progress(
-                        min(overall_progress, 1.0),
-                        text=f"Uploading {clip_path.name}: {clip_percent}% · overall {overall_progress * 100:.0f}% · approx. {_format_wait(eta)} remaining"
+                        min(fraction, 1.0),
+                        text=f"Uploading {clip_path.name}: {chunk_status.progress() * 100:.0f}% · approx. {_format_wait(eta)} remaining"
                     )
 
             video_id = response.get("id") if response else None
             if not video_id:
                 raise RuntimeError(f"{clip_path.name} upload ke baad YouTube video ID nahi mila.")
 
+            # Save upload state first. If thumbnail generation fails, the successful
+            # video upload is still recorded and will never be sent twice.
             uploaded[clip_path.name] = {
                 "video_id": video_id,
                 "publish_at": publish_at,
+                "thumbnail_status": "pending",
             }
             save_json_atomic(status_path, uploaded)
+
+            thumb_ok = apply_youtube_thumbnail(
+                youtube, video_id, clip_path, Path(status_path).parent,
+                meta.get("title", "")
+            )
+            uploaded[clip_path.name]["thumbnail_status"] = "set" if thumb_ok else "not_set"
+            save_json_atomic(status_path, uploaded)
+
+            # Delete the local clip only after YouTube has confirmed the upload.
+            try:
+                clip_path.unlink()
+            except OSError as delete_error:
+                st.warning(f"{clip_path.name} upload ho gayi, local copy delete nahi hui: {delete_error}")
+
+            # Shared channel queue checkpoint, used when another gameplay source is processed.
+            queue_path = UPLOAD_DIR / "youtube_global_queue.json"
+            save_json_atomic(queue_path, {"last_publish_at": publish_at, "last_video_id": video_id})
+
             results.append((clip_path.name, video_id, f"scheduled · {local_slot}"))
             status_box.write(f"✅ **{clip_path.name}** — Scheduled: **{local_slot}**")
             status_box.write(f"https://www.youtube.com/watch?v={video_id}")
-            progress.progress(
-                index / total_clips,
-                text=f"Scheduled · {index}/{total_clips} clips complete"
-            )
-            next_publish += timedelta(hours=3, minutes=30)
+            status_box.write("🖼️ AI thumbnail set." if thumb_ok else "ℹ️ Thumbnail unavailable; video upload is saved.")
+            progress.progress(index / len(batch), text=f"Uploaded · {index}/{len(batch)}")
+            if index < len(batch):
+                next_publish += timedelta(minutes=random.randint(210, 300))
 
-        status_box.update(label=f"✅ YouTube scheduling complete — {len(results)}/{total_clips} clips", state="complete", expanded=True)
-        progress.progress(1.0, text=f"✅ All {total_clips} clips uploaded and scheduled.")
+        if remaining:
+            status_box.write(f"📦 {remaining} clip(s) abhi queue mein saved hain. Agle batch ke liye baad mein button dabana.")
+        status_box.update(
+            label=f"✅ Batch complete — {len(results)} video(s) uploaded/scheduled",
+            state="complete", expanded=True
+        )
+        progress.progress(1.0, text=f"✅ Batch complete · {len(results)} uploaded · {remaining} queued")
     except Exception as error:
-        status_box.update(label="⚠️ YouTube scheduling ruk gaya — neeche status dekho.", state="error", expanded=True)
+        status_box.update(label="⚠️ Upload/scheduling ruk gaya — pending clips safe rakhi gayi hain.", state="error", expanded=True)
         error_text = str(error)
         if "quotaExceeded" in error_text:
-            st.error("YouTube API quota khatam ho gayi hai. Quota reset hone ke baad dobara try karo.")
+            st.error("YouTube API quota khatam ho gayi hai. Pending clips delete nahi ki gayi hain.")
+        elif "uploadLimitExceeded" in error_text:
+            st.error("YouTube channel upload limit reach ho gayi. Pending clips safe hain; limit clear hone par next batch try karna.")
         else:
             st.error(f"YouTube upload/scheduling error: {error_text[:500]}")
     return results
@@ -695,6 +798,23 @@ def cleanup_expired_clip_history():
         if not clips:
             continue
         newest_clip_time = max(path.stat().st_mtime for path in clips)
+        # Never expire a job while any clip is still waiting for YouTube upload.
+        status_path = job_dir / "youtube_uploads.json"
+        try:
+            with open(status_path, "r", encoding="utf-8") as file:
+                saved_uploads = json.load(file)
+            if not isinstance(saved_uploads, dict):
+                saved_uploads = {}
+        except (OSError, ValueError, json.JSONDecodeError):
+            saved_uploads = {}
+        pending_clips = [
+            clip for clip in clips
+            if not (isinstance(saved_uploads.get(clip.name), dict)
+                    and saved_uploads[clip.name].get("video_id"))
+            and not saved_uploads.get(clip.name)
+        ]
+        if pending_clips:
+            continue
         if now - newest_clip_time >= CLIP_HISTORY_RETENTION_SECONDS:
             shutil.rmtree(job_dir, ignore_errors=True)
 
@@ -1335,11 +1455,11 @@ with st.sidebar:
         st.error(st.session_state.youtube_oauth_error)
     youtube_connected = bool(st.session_state.get("youtube_credentials"))
     auto_upload_youtube = st.checkbox(
-        "Automatically upload and schedule all generated clips (3.5-hour gap)",
+        "Automatically upload and schedule the next 1–2 clips",
         value=st.session_state.get("auto_upload_youtube_v2", True),
         disabled=not youtube_connected,
         key="auto_upload_youtube_v2",
-        help="Clips upload as Private scheduled videos. The first publishes 3.5 hours from now; each next clip is 3.5 hours later. New batches continue after the latest scheduled slot on your channel."
+        help="Har run mein maximum 2 clips upload hongi. Har scheduled publish time ke beech random 3.5–5 hours ka gap hoga. Baaki clips queue mein rahengi."
     )
 
 if st.session_state.page == "history":
@@ -1560,7 +1680,7 @@ else:
         completed = sorted(Path(output_dir).glob("Gaming_Short_*.mp4")) if Path(output_dir).exists() else []
         if completed:
             if st.session_state.get("youtube_credentials"):
-                if st.button("📅 Upload and schedule generated clips", use_container_width=True):
+                if st.button("📅 Upload next 1–2 queued clips", use_container_width=True):
                     try:
                         youtube_service = get_youtube_service()
                         upload_status = str(job_dir / "youtube_uploads.json")
