@@ -941,6 +941,45 @@ def _create_whoosh(output_dir):
     return path
 
 
+def _create_like_subscribe_overlay(output_dir, width, height):
+    """Create a transparent bottom CTA banner using OpenCV (no extra package)."""
+    overlay = np.zeros((height, width, 4), dtype=np.uint8)
+    scale = width / 1080.0
+    font = cv2.FONT_HERSHEY_DUPLEX
+    font_scale = 1.05 * scale
+    thickness = max(2, int(2.5 * scale))
+    like_text = "LIKE"
+    sub_text = "SUBSCRIBE"
+    (like_w, like_h), _ = cv2.getTextSize(like_text, font, font_scale, thickness)
+    (sub_w, sub_h), _ = cv2.getTextSize(sub_text, font, font_scale, thickness)
+    gap = int(52 * scale)
+    pad_x = int(38 * scale)
+    pad_y = int(25 * scale)
+    total_w = like_w + sub_w + gap + pad_x * 2
+    box_h = max(like_h, sub_h) + pad_y * 2
+    x1 = max(int(24 * scale), (width - total_w) // 2)
+    x2 = min(width - int(24 * scale), x1 + total_w)
+    y2 = height - int(72 * scale)
+    y1 = y2 - box_h
+    # Dark translucent pill behind both calls to action.
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), (12, 16, 28, 218), -1, cv2.LINE_AA)
+    like_x = x1 + pad_x
+    text_y = y1 + pad_y + max(like_h, sub_h)
+    cv2.putText(overlay, like_text, (like_x, text_y), font, font_scale,
+                (255, 255, 255, 255), thickness, cv2.LINE_AA)
+    sub_x = like_x + like_w + gap
+    sub_rect_x1 = sub_x - int(18 * scale)
+    sub_rect_x2 = min(x2 - int(12 * scale), sub_x + sub_w + int(18 * scale))
+    cv2.rectangle(overlay, (sub_rect_x1, y1 + int(10 * scale)),
+                  (sub_rect_x2, y2 - int(10 * scale)), (35, 45, 220, 245), -1, cv2.LINE_AA)
+    cv2.putText(overlay, sub_text, (sub_x, text_y), font, font_scale,
+                (255, 255, 255, 255), thickness, cv2.LINE_AA)
+    path = str(Path(output_dir) / f"like_subscribe_{width}x{height}.png")
+    if not cv2.imwrite(path, overlay):
+        raise RuntimeError("Like/Subscribe overlay image create nahi ho paayi.")
+    return path
+
+
 def _has_audio_stream(ffmpeg, video_path):
     probe = subprocess.run(
         [ffmpeg, "-v", "error", "-i", str(video_path), "-map", "0:a:0",
@@ -956,6 +995,10 @@ def export_clips(video_path, chosen, vertical, output_dir, captions_path=None):
     outputs = []
     progress = st.progress(0, text="Viral edits apply ho rahe hain...")
     whoosh_path = _create_whoosh(output_dir)
+    frame_width, frame_height = (1080, 1920) if vertical else (1920, 1080)
+    cta_overlay_path = _create_like_subscribe_overlay(
+        output_dir, frame_width, frame_height
+    )
     has_audio = _has_audio_stream(ffmpeg, video_path)
     for index, (score, start_time, end_time) in enumerate(chosen, start=1):
         output_path = os.path.join(output_dir, f"Gaming_Short_{index}.mp4")
@@ -994,21 +1037,27 @@ def export_clips(video_path, chosen, vertical, output_dir, captions_path=None):
             )
 
         command = [
-            ffmpeg, "-y", "-ss", f"{start_time:.3f}", "-i", str(video_path)
+            ffmpeg, "-y", "-ss", f"{start_time:.3f}", "-i", str(video_path),
+            "-loop", "1", "-i", cta_overlay_path
         ]
         if has_audio:
             command += ["-i", str(whoosh_path)]
-        command += ["-t", f"{clip_duration:.3f}", "-map", "0:v:0", "-vf", video_filter]
+        command += [
+            "-t", f"{clip_duration:.3f}",
+            "-filter_complex",
+            f"[0:v]{video_filter}[basev];[basev][1:v]overlay=0:0:shortest=1[vout]"
+        ]
         if has_audio:
             command += [
                 "-filter_complex",
-                "[0:a]loudnorm=I=-16:TP=-1.5:LRA=11[base];"
-                "[1:a]volume=0.18,adelay=120|120[fx];"
-                "[base][fx]amix=inputs=2:duration=first:dropout_transition=0[aout]",
-                "-map", "[aout]"
+                f"[0:v]{video_filter}[basev];[basev][1:v]overlay=0:0:shortest=1[vout];"
+                "[0:a]loudnorm=I=-16:TP=-1.5:LRA=11[basea];"
+                "[2:a]volume=0.18,adelay=120|120[fx];"
+                "[basea][fx]amix=inputs=2:duration=first:dropout_transition=0[aout]",
+                "-map", "[vout]", "-map", "[aout]"
             ]
         else:
-            command += ["-an"]
+            command += ["-map", "[vout]", "-an"]
         command += [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
             "-pix_fmt", "yuv420p"
@@ -1040,7 +1089,7 @@ with st.sidebar:
         st.rerun()
     st.divider()
     st.header("⚙️ Clip settings")
-    st.info("Viral Auto Editing ON: smart 9:16 framing, gentle zoom, AI captions when Gemini speech transcript is available, audio leveling, color boost aur subtle whoosh SFX. Clip duration 10 seconds se maximum 3 minutes.")
+    st.info("Viral Auto Editing ON: smart 9:16 framing, gentle zoom, AI captions, audio leveling, color boost, subtle whoosh SFX aur bottom par LIKE + SUBSCRIBE banner. Clip duration 10 seconds se maximum 3 minutes.")
     vertical = st.checkbox("9:16 YouTube Shorts format", value=True)
     category = st.selectbox(
         "Video category",
