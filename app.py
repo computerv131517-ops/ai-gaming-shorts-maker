@@ -507,7 +507,7 @@ def get_job_dir(video_path, vertical, category):
     with open(video_path, "rb") as source:
         for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""):
             digest.update(chunk)
-    settings = f"auto-variable-duration-v1|{int(vertical)}|{category}"
+    settings = f"auto-semantic-variable-duration-v2|{int(vertical)}|{category}"
     job_id = hashlib.sha256((digest.hexdigest() + settings).encode()).hexdigest()[:20]
     folder = UPLOAD_DIR / "processing_jobs" / job_id
     folder.mkdir(parents=True, exist_ok=True)
@@ -582,6 +582,106 @@ def extract_audio_activity(video_path, sample_times):
     except Exception:
         return np.zeros(len(sample_times), dtype=np.float32)
 
+def analyse_video_with_gemini(video_path, duration, category):
+    """Use Gemini video understanding to find real, context-complete highlights."""
+    api_key = get_gemini_api_key()
+    if not api_key:
+        return None
+
+    from google import genai
+    client = genai.Client(api_key=api_key)
+    uploaded_file = None
+    try:
+        st.info("🧠 Gemini gameplay understanding: events, context aur complete moments analyse ho rahe hain...")
+        uploaded_file = client.files.upload(file=str(video_path))
+        started = time.time()
+        while not uploaded_file.state or uploaded_file.state.name != "ACTIVE":
+            if uploaded_file.state and uploaded_file.state.name == "FAILED":
+                raise RuntimeError("Gemini video processing fail ho gayi.")
+            if time.time() - started > 1800:
+                raise TimeoutError("Gemini video analysis 30 minutes se zyada le rahi hai.")
+            time.sleep(5)
+            uploaded_file = client.files.get(name=uploaded_file.name)
+
+        prompt = f"""
+You are an expert gameplay highlight editor. Watch and understand the ENTIRE video,
+including visual events, game context, reactions and available audio.
+Video duration: {duration:.2f} seconds.
+Selected category: {category}.
+
+Find every genuinely strong, distinct, short-form-worthy moment. For gaming, look for
+kills, multi-kills, clutch attempts/results, close escapes, intense fights, funny
+mistakes, unexpected events, impressive skill, wins and strong reactions. Do not
+assume an event happened: only report moments clearly visible/audible in this video.
+For other categories, identify the equivalent genuinely interesting complete moments.
+
+For each highlight choose precise start_seconds and end_seconds:
+- Include enough lead-in to understand what is happening and the complete payoff/reaction.
+- Do not cut in the middle of an action, sentence, joke or reaction.
+- Let each moment have its natural duration; do NOT force a common duration.
+- Each clip must be at least 10 seconds and no longer than 180 seconds.
+- Prefer one complete event, not arbitrary chunks of unrelated gameplay.
+- Avoid filler, repetitive scenes and overlapping/duplicate moments.
+- Return all distinct strong moments; do not invent moments just to increase the count.
+- Timestamps must be within the source video's duration.
+
+Return ONLY valid JSON in this exact structure:
+{{"highlights":[{{"start_seconds":12.5,"end_seconds":48.0,"event":"clutch","reason":"Brief factual explanation","confidence":0.93}}]}}
+If no genuinely strong moments exist, return {{"highlights":[]}}.
+"""
+        response = client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=[uploaded_file, prompt]
+        )
+        raw = (response.text or "").strip()
+        if raw.startswith("\x60\x60\x60"):
+            raw = raw.split("\n", 1)[-1].rsplit("\x60\x60\x60", 1)[0].strip()
+            if raw.lower().startswith("json"):
+                raw = raw[4:].strip()
+        data = json.loads(raw)
+        raw_highlights = data.get("highlights", [])
+        if not isinstance(raw_highlights, list):
+            raise ValueError("Gemini response ka highlights format valid nahi hai.")
+
+        candidates = []
+        for item in raw_highlights:
+            if not isinstance(item, dict):
+                continue
+            try:
+                start_time = max(0.0, float(item["start_seconds"]))
+                end_time = min(float(duration), float(item["end_seconds"]))
+                confidence = float(item.get("confidence", 0.75))
+            except (KeyError, TypeError, ValueError):
+                continue
+            clip_length = end_time - start_time
+            if clip_length < 10.0 or clip_length > 180.0:
+                continue
+            if not (0.0 <= start_time < end_time <= duration):
+                continue
+            confidence = min(1.0, max(0.0, confidence))
+            candidates.append((confidence, start_time, end_time))
+
+        # Keep the strongest non-overlapping detections; no fixed clip-count slider.
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        chosen = []
+        for score, start_time, end_time in candidates:
+            if all(end_time <= old_start or start_time >= old_end
+                   for _, old_start, old_end in chosen):
+                chosen.append((score, start_time, end_time))
+        chosen.sort(key=lambda item: item[1])
+        if chosen:
+            st.success(f"Gemini ne {len(chosen)} distinct gameplay moments identify kiye.")
+            return chosen
+        st.warning("Gemini ko clear complete highlights nahi mile; visual/audio detection fallback use hogi.")
+        return None
+    finally:
+        if uploaded_file is not None:
+            try:
+                client.files.delete(name=uploaded_file.name)
+            except Exception:
+                pass
+
+
 def analyse_video(video_path, checkpoint_file, category):
     """Detect highlight-like moments and choose a separate 10-180 second duration."""
     cap = cv2.VideoCapture(str(video_path))
@@ -596,6 +696,20 @@ def analyse_video(video_path, checkpoint_file, category):
     if duration < 10:
         cap.release()
         raise ValueError("Video kam se kam 10 seconds ki honi chahiye.")
+
+    # Prefer semantic AI understanding when a Gemini key is available.
+    try:
+        semantic_chosen = analyse_video_with_gemini(video_path, duration, category)
+        if semantic_chosen:
+            try:
+                os.remove(checkpoint_file)
+            except FileNotFoundError:
+                pass
+            st.session_state["last_analysis_mode"] = "Gemini semantic AI"
+            return duration, semantic_chosen
+    except Exception as semantic_error:
+        st.warning(f"Gemini semantic analysis use nahi ho paayi; visual/audio fallback chalega: {semantic_error}")
+    st.session_state["last_analysis_mode"] = "Visual + audio fallback"
 
     sample_times = np.arange(0, duration, 0.5)
     audio_scores = extract_audio_activity(video_path, sample_times)
@@ -774,7 +888,7 @@ with st.sidebar:
         ["Auto (all categories)", "Gaming", "Sports", "Vlog / Travel",
          "Podcast / Talking", "Education / Tutorial", "Reaction / Comedy", "Other"]
     )
-    st.caption("Moment detection visual movement, scene changes aur audio activity par based hai; abhi kills/clutches ko semantically samajhne wala trained model nahi hai.")
+    st.caption("Gemini API key ke saath semantic gameplay understanding (kills, clutch, funny moments, fights, wins) use hogi. Key na ho ya AI fail ho toh visual/audio fallback chalega.")
     st.divider()
     st.header("✨ AI video metadata")
     st.text_input(
