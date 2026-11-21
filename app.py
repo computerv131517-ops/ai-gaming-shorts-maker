@@ -896,14 +896,14 @@ with st.sidebar:
         type="password",
         key="gemini_api_key_input",
         placeholder="Paste your Gemini API key",
-        help="Key is used only in this active app session and is not written to the GitHub code or job files."
+        help="For permanent setup, add this once in Streamlit Cloud > Manage app > Settings > Secrets as [gemini] followed by api_key = \"YOUR_KEY\". A saved secret is loaded automatically in future sessions."
     )
     if get_gemini_api_key():
-        st.success("Gemini API key available for this session")
+        st.success("Gemini API key available — saved Streamlit Secret or current session key detected")
         st.caption("Key ko chat, screenshot ya public GitHub file mein share mat karna.")
     else:
-        st.info("Gemini API key paste karo. Ya phir Streamlit Secrets ka existing setup use kar sakte ho.")
-        st.caption("Bina key ke clipping chalegi, lekin AI title/description/hashtags generate nahi honge.")
+        st.info("Permanent setup ke liye Streamlit Cloud > Manage app > Settings > Secrets mein Gemini key ek baar save karo.")
+        st.caption("Secrets mein save karne ke baad har session mein key dobara paste nahi karni padegi. Bina key ke visual/audio fallback clipping chalegi.")
     st.divider()
     st.header("▶️ YouTube channel")
     oauth_config = youtube_oauth_config()
