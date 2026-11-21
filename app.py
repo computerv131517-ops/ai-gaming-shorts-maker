@@ -424,14 +424,15 @@ def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
     return results
 
 
-handle_youtube_oauth_callback()
-
-
 def save_json_atomic(path, data):
     temp_path = str(path) + ".tmp"
     with open(temp_path, "w", encoding="utf-8") as file:
         json.dump(data, file)
     os.replace(temp_path, path)
+
+
+# Handle the Google redirect only after all helper functions are defined.
+handle_youtube_oauth_callback()
 
 def get_job_dir(video_path, clip_seconds, number_of_clips, vertical, category):
     digest = hashlib.sha256()
@@ -708,18 +709,22 @@ with st.sidebar:
             st.session_state.auto_upload_youtube = False
             st.rerun()
     else:
-        flow = Flow.from_client_config(
-            oauth_config, scopes=YOUTUBE_UPLOAD_SCOPE,
-            autogenerate_code_verifier=False
-        )
-        flow.redirect_uri = YOUTUBE_REDIRECT_URI
-        oauth_state = make_youtube_oauth_state(oauth_config["web"]["client_secret"])
-        auth_url, _ = flow.authorization_url(
-            state=oauth_state,
-            access_type="offline", include_granted_scopes="true", prompt="consent"
-        )
-        st.link_button("Connect YouTube with Google", auth_url, use_container_width=True)
-        st.caption("Google sign-in par permission approve karni hogi. Password app ko nahi diya jata.")
+        try:
+            flow = Flow.from_client_config(
+                oauth_config, scopes=YOUTUBE_UPLOAD_SCOPE,
+                autogenerate_code_verifier=False
+            )
+            flow.redirect_uri = YOUTUBE_REDIRECT_URI
+            oauth_state = make_youtube_oauth_state(oauth_config["web"]["client_secret"])
+            auth_url, _ = flow.authorization_url(
+                state=oauth_state,
+                access_type="offline", include_granted_scopes="true", prompt="consent"
+            )
+            st.link_button("Connect YouTube with Google", auth_url, use_container_width=True)
+            st.caption("Google sign-in par permission approve karni hogi. Password app ko nahi diya jata.")
+        except Exception as oauth_error:
+            st.warning("YouTube sign-in setup mein issue hai. Baaki video clipping features use kar sakte ho.")
+            st.caption(str(oauth_error)[:250])
     if st.session_state.get("youtube_oauth_error"):
         st.error(st.session_state.youtube_oauth_error)
     youtube_connected = bool(st.session_state.get("youtube_credentials"))
