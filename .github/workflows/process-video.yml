@@ -32,8 +32,10 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-      - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install FFmpeg and caption fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Process private video job
@@ -41,5 +43,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-3.8-flash
           VIDEO_CATEGORY: ${{ inputs.category }}
-        run: python worker.py --job-id '${{ inputs.job_id }}'
+          JOB_ID: ${{ inputs.job_id }}
+        run: python worker.py --job-id "$JOB_ID"
