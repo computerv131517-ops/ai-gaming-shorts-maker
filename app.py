@@ -117,8 +117,14 @@ def delete_source_video_after_download(source_path):
         st.session_state.source_delete_error = str(error)
 
 
+def _format_wait(seconds):
+    seconds = max(0, int(seconds))
+    minutes, secs = divmod(seconds, 60)
+    return f"{minutes}m {secs}s" if minutes else f"{secs}s"
+
+
 def download_video_from_url(video_url):
-    """Download a public video from supported sites; never use login/cookies or bypass access controls."""
+    """Download a public video with live percentage and ETA when available."""
     parsed = urlparse(video_url.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("Valid public http/https video link paste karo.")
@@ -150,6 +156,29 @@ def download_video_from_url(video_url):
     }
     # Do not force a YouTube player client; let the current yt-dlp extractor
     # select supported clients and formats for this request.
+    download_progress = st.progress(0, text="Link se video details mil rahi hain...")
+    download_started = time.time()
+
+    def _download_hook(data):
+        status = data.get("status")
+        if status == "downloading":
+            total = data.get("total_bytes") or data.get("total_bytes_estimate")
+            done = data.get("downloaded_bytes", 0)
+            if total:
+                fraction = min(max(float(done) / max(float(total), 1), 0), 1)
+                speed = data.get("speed") or 0
+                eta = data.get("eta")
+                if eta is None and speed:
+                    eta = max(0, (total - done) / speed)
+                eta_text = _format_wait(eta) if eta is not None else "calculating..."
+                download_progress.progress(fraction, text=f"Video download: {fraction * 100:.1f}% · approx. {eta_text} remaining")
+            else:
+                elapsed = _format_wait(time.time() - download_started)
+                download_progress.progress(0, text=f"Video download chal raha hai · elapsed {elapsed} · total size unavailable")
+        elif status == "finished":
+            download_progress.progress(1.0, text="Download complete · file merge/verification chal rahi hai...")
+
+    options["progress_hooks"] = [_download_hook]
     try:
         with yt_dlp.YoutubeDL(options) as downloader:
             info = downloader.extract_info(video_url.strip(), download=True)
@@ -160,8 +189,10 @@ def download_video_from_url(video_url):
                 downloaded = mp4_path
         if not downloaded.exists() or downloaded.stat().st_size == 0:
             raise RuntimeError("Video download complete nahi hui. Link public aur supported hona chahiye.")
+        download_progress.progress(1.0, text="✅ Video download 100% complete")
         return downloaded
     except Exception as error:
+        download_progress.empty()
         error_text = str(error)
         if "HTTP Error 403" in error_text or "403: Forbidden" in error_text:
             message = (
@@ -337,6 +368,8 @@ def generate_video_metadata(video_path, job_dir, category):
     uploaded_file = None
     try:
         st.info('AI poori original video analyse karke common metadata bana raha hai. Ismein kuch waqt lag sakta hai.')
+        wait_started = time.time()
+        wait_status = st.status("⏳ Gemini video processing ka wait ho raha hai...", expanded=True)
         uploaded_file = client.files.upload(file=str(video_path))
         started = time.time()
         while not uploaded_file.state or uploaded_file.state.name != 'ACTIVE':
@@ -344,8 +377,11 @@ def generate_video_metadata(video_path, job_dir, category):
                 raise RuntimeError('Gemini video processing fail ho gayi.')
             if time.time() - started > 1800:
                 raise TimeoutError('Video analysis 30 minutes se zyada le rahi hai. Dobara try karo.')
+            elapsed_text = _format_wait(time.time() - wait_started)
+            wait_status.update(label=f"⏳ Gemini processing... · elapsed {elapsed_text} · provider exact % share nahi karta", state="running")
             time.sleep(5)
             uploaded_file = client.files.get(name=uploaded_file.name)
+        wait_status.update(label="✅ Gemini video processing complete", state="complete")
         prompt = f'''Analyze the ENTIRE uploaded video, including visual scenes and available audio context.
 Selected category: {category}.
 Create ONE shared metadata set for all Shorts cut from this source video.
@@ -461,6 +497,7 @@ def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
 
     status_box = st.status("⏳ YouTube par clips upload aur schedule ho rahi hain...", expanded=True)
     progress = st.progress(0, text=f"Scheduling starting · 0/{total_clips} clips")
+    upload_started = time.time()
     try:
         next_publish = get_next_youtube_publish_time(youtube)
         status_box.write(
@@ -524,9 +561,11 @@ def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
                     overall_progress = (
                         (index - 1) + float(chunk_status.progress())
                     ) / total_clips
+                    elapsed = time.time() - upload_started
+                    eta = (elapsed / max(overall_progress, 0.01)) * (1 - overall_progress)
                     progress.progress(
                         min(overall_progress, 1.0),
-                        text=f"Uploading {clip_path.name}: {clip_percent}% · clip {index}/{total_clips}"
+                        text=f"Uploading {clip_path.name}: {clip_percent}% · overall {overall_progress * 100:.0f}% · approx. {_format_wait(eta)} remaining"
                     )
 
             video_id = response.get("id") if response else None
@@ -659,6 +698,8 @@ def analyse_video_with_gemini(video_path, duration, category, captions_path=None
     uploaded_file = None
     try:
         st.info("🧠 Gemini AI visuals + audio analyse kar raha hai: laughter, shouting, surprise, excitement, frustration aur gameplay highlights...")
+        wait_started = time.time()
+        wait_status = st.status("⏳ Gemini gameplay video process kar raha hai...", expanded=True)
         uploaded_file = client.files.upload(file=str(video_path))
         started = time.time()
         while not uploaded_file.state or uploaded_file.state.name != "ACTIVE":
@@ -666,8 +707,11 @@ def analyse_video_with_gemini(video_path, duration, category, captions_path=None
                 raise RuntimeError("Gemini video processing fail ho gayi.")
             if time.time() - started > 1800:
                 raise TimeoutError("Gemini video analysis 30 minutes se zyada le rahi hai.")
+            elapsed_text = _format_wait(time.time() - wait_started)
+            wait_status.update(label=f"⏳ Gemini gameplay processing... · elapsed {elapsed_text} · exact % available nahi hai", state="running")
             time.sleep(5)
             uploaded_file = client.files.get(name=uploaded_file.name)
+        wait_status.update(label="✅ Gemini gameplay processing complete", state="complete")
 
         prompt = f"""
 You are an expert gameplay highlight editor. Watch and understand the ENTIRE video,
@@ -1054,6 +1098,7 @@ def export_clips(video_path, chosen, vertical, output_dir, captions_path=None):
     os.makedirs(output_dir, exist_ok=True)
     outputs = []
     progress = st.progress(0, text="Viral edits apply ho rahe hain...")
+    export_started = time.time()
     whoosh_path = _create_whoosh(output_dir)
     frame_width, frame_height = (1080, 1920) if vertical else (1920, 1080)
     cta_overlay_path = _create_like_subscribe_overlay(
@@ -1144,8 +1189,10 @@ def export_clips(video_path, chosen, vertical, output_dir, captions_path=None):
             details = result.stderr[-1800:] if result.stderr else "Unknown FFmpeg error"
             raise RuntimeError(f"Clip {index} export nahi hui:\\n{details}")
         outputs.append(output_path)
-        progress.progress(index / len(chosen),
-                          text=f"Viral edits complete... {index}/{len(chosen)}")
+        fraction = index / len(chosen)
+        elapsed = time.time() - export_started
+        eta = (elapsed / max(index, 1)) * (len(chosen) - index)
+        progress.progress(fraction, text=f"Viral edits: {fraction * 100:.0f}% · clip {index}/{len(chosen)} · approx. {_format_wait(eta)} remaining")
     progress.empty()
     return outputs
 
