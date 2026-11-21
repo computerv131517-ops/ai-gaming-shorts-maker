@@ -6,6 +6,8 @@ import tempfile
 import zipfile
 import subprocess
 import hashlib
+import hmac
+import secrets
 import json
 from pathlib import Path
 from urllib.parse import urlparse
@@ -198,25 +200,45 @@ def youtube_oauth_config():
     }
 
 
+def make_youtube_oauth_state(client_secret):
+    # Signed state survives Google's redirect even if Streamlit creates a new session.
+    nonce = secrets.token_urlsafe(32)
+    signature = hmac.new(
+        client_secret.encode("utf-8"), nonce.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return nonce + "." + signature
+
+
+def valid_youtube_oauth_state(state, client_secret):
+    if not state or "." not in state:
+        return False
+    nonce, supplied_signature = state.rsplit(".", 1)
+    expected_signature = hmac.new(
+        client_secret.encode("utf-8"), nonce.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(supplied_signature, expected_signature)
+
+
 def handle_youtube_oauth_callback():
     code = st.query_params.get("code")
     returned_state = st.query_params.get("state")
     if not code:
         return
-    expected_state = st.session_state.get("youtube_oauth_state")
     config = youtube_oauth_config()
-    if not config or not expected_state or returned_state != expected_state:
-        st.session_state.youtube_oauth_error = "Google sign-in verify nahi ho paaya. Connect button dobara try karo."
+    client_secret = config["web"]["client_secret"] if config else ""
+    if not config or not valid_youtube_oauth_state(returned_state, client_secret):
+        st.session_state.youtube_oauth_error = (
+            "Google sign-in state verification failed. Please return to the app and try Connect YouTube again."
+        )
         st.query_params.clear()
         return
     try:
         flow = Flow.from_client_config(
-            config, scopes=YOUTUBE_UPLOAD_SCOPE, state=expected_state
+            config, scopes=YOUTUBE_UPLOAD_SCOPE, state=returned_state
         )
         flow.redirect_uri = YOUTUBE_REDIRECT_URI
         flow.fetch_token(code=code)
         st.session_state.youtube_credentials = flow.credentials.to_json()
-        st.session_state.youtube_oauth_state = None
         st.session_state.youtube_oauth_error = None
     except Exception as error:
         st.session_state.youtube_oauth_error = "Google connection failed: " + str(error)[:300]
@@ -687,10 +709,11 @@ with st.sidebar:
     else:
         flow = Flow.from_client_config(oauth_config, scopes=YOUTUBE_UPLOAD_SCOPE)
         flow.redirect_uri = YOUTUBE_REDIRECT_URI
-        auth_url, oauth_state = flow.authorization_url(
+        oauth_state = make_youtube_oauth_state(oauth_config["web"]["client_secret"])
+        auth_url, _ = flow.authorization_url(
+            state=oauth_state,
             access_type="offline", include_granted_scopes="true", prompt="consent"
         )
-        st.session_state.youtube_oauth_state = oauth_state
         st.link_button("Connect YouTube with Google", auth_url, use_container_width=True)
         st.caption("Google sign-in par permission approve karni hogi. Password app ko nahi diya jata.")
     if st.session_state.get("youtube_oauth_error"):
