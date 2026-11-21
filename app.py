@@ -506,7 +506,7 @@ def upload_clip_now_to_youtube(youtube, clip_path, status_path, metadata=None):
         "snippet": {
             "title": ((meta.get("title") or clip_path.stem.replace("_", " ") + " #Shorts"))[:100],
             "description": ((meta.get("description") or "Created with AI Gaming Shorts Maker.")
-                            + "\\n\\n" + " ".join(meta.get("hashtags", [])))[:5000],
+                            + "\n\n" + " ".join(meta.get("hashtags", [])))[:5000],
             "categoryId": "20",
             "tags": [str(tag).strip().lstrip("#") for tag in (meta.get("hashtags", []) or [])
                      if str(tag).strip()][:30],
@@ -1666,7 +1666,7 @@ if st.button("🆕 Updates & Commit History", use_container_width=True):
 if st.session_state.show_update_history:
     st.markdown("### Website updates")
     st.markdown("""
-    **Latest update — 21 Nov 2026**\\n\\n    - Added public video URL fetching for supported platforms (YouTube, Vimeo, Dailymotion, Twitch and Streamable); link fetching does not start clipping automatically.
+    **Latest update — 21 Nov 2026**\n\n    - Added public video URL fetching for supported platforms (YouTube, Vimeo, Dailymotion, Twitch and Streamable); link fetching does not start clipping automatically.
 
     - Added Google OAuth connection for YouTube and private uploads of generated Shorts. Automatic upload can be controlled from the sidebar; manual upload is also available.
 
