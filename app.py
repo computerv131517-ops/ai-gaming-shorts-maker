@@ -482,6 +482,64 @@ def get_next_youtube_publish_time(youtube):
     return (latest_future if latest_future and latest_future > now else now) + timedelta(hours=3, minutes=30)
 
 
+def upload_clip_now_to_youtube(youtube, clip_path, status_path, metadata=None):
+    """Upload one history clip immediately as Private, without a scheduled publishAt."""
+    clip_path = Path(clip_path)
+    if not clip_path.is_file() or clip_path.stat().st_size == 0:
+        raise RuntimeError(f"{clip_path.name} missing hai ya empty hai.")
+
+    try:
+        with open(status_path, "r", encoding="utf-8") as file:
+            uploaded = json.load(file)
+        if not isinstance(uploaded, dict):
+            uploaded = {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        uploaded = {}
+
+    saved = uploaded.get(clip_path.name)
+    saved_id = saved.get("video_id") if isinstance(saved, dict) else saved
+    if saved_id:
+        return saved_id, "already uploaded"
+
+    meta = metadata or {}
+    body = {
+        "snippet": {
+            "title": ((meta.get("title") or clip_path.stem.replace("_", " ") + " #Shorts"))[:100],
+            "description": ((meta.get("description") or "Created with AI Gaming Shorts Maker.")
+                            + "\\n\\n" + " ".join(meta.get("hashtags", [])))[:5000],
+            "categoryId": "20",
+            "tags": [str(tag).strip().lstrip("#") for tag in (meta.get("hashtags", []) or [])
+                     if str(tag).strip()][:30],
+        },
+        "status": {
+            "privacyStatus": "private",
+            "selfDeclaredMadeForKids": False,
+        },
+    }
+    media = MediaFileUpload(
+        str(clip_path), mimetype="video/mp4",
+        chunksize=8 * 1024 * 1024, resumable=True
+    )
+    request = youtube.videos().insert(
+        part="snippet,status", body=body, media_body=media
+    )
+    response = None
+    while response is None:
+        _, response = request.next_chunk(num_retries=3)
+
+    video_id = response.get("id") if response else None
+    if not video_id:
+        raise RuntimeError("YouTube upload ke baad video ID nahi mila.")
+
+    uploaded[clip_path.name] = {
+        "video_id": video_id,
+        "publish_at": None,
+        "upload_mode": "direct_private",
+    }
+    save_json_atomic(status_path, uploaded)
+    return video_id, "uploaded privately"
+
+
 def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
     """Upload clips and schedule each one 3.5 hours after the previous slot."""
     try:
@@ -1295,9 +1353,42 @@ if st.session_state.page == "history":
             minutes_left = max(0, int((item["expires_at"] - time.time()) / 60))
             with st.expander(f"{job_dir.name} · {len(clips)} clips · approx. {minutes_left} min left", expanded=True):
                 show_video_metadata(load_video_metadata(job_dir))
+                upload_status_path = job_dir / "youtube_uploads.json"
+                try:
+                    with open(upload_status_path, "r", encoding="utf-8") as status_file:
+                        history_uploads = json.load(status_file)
+                    if not isinstance(history_uploads, dict):
+                        history_uploads = {}
+                except (FileNotFoundError, json.JSONDecodeError, OSError):
+                    history_uploads = {}
+
                 for clip_path in clips:
                     st.write(f"**{clip_path.name}**")
                     st.video(str(clip_path))
+                    saved_upload = history_uploads.get(clip_path.name)
+                    saved_video_id = saved_upload.get("video_id") if isinstance(saved_upload, dict) else saved_upload
+                    if saved_video_id:
+                        st.success("YouTube par upload ho chuki hai.")
+                        st.markdown(f"[YouTube video kholo](https://www.youtube.com/watch?v={saved_video_id})")
+                    elif st.session_state.get("youtube_credentials"):
+                        if st.button(
+                            f"⬆️ Upload Now (Private) — {clip_path.name}",
+                            key=f"history_upload_now_{job_dir.name}_{clip_path.name}",
+                            use_container_width=True
+                        ):
+                            try:
+                                yt_service = get_youtube_service()
+                                video_id, upload_state = upload_clip_now_to_youtube(
+                                    yt_service, clip_path, str(upload_status_path),
+                                    load_video_metadata(job_dir)
+                                )
+                                st.success(f"Upload complete: https://www.youtube.com/watch?v={video_id} ({upload_state})")
+                                st.rerun()
+                            except Exception as upload_error:
+                                st.error(f"Direct YouTube upload nahi ho paaya: {str(upload_error)[:500]}")
+                    else:
+                        st.info("Direct upload ke liye sidebar se YouTube connect karo.")
+
                     with open(clip_path, "rb") as clip_file:
                         st.download_button(
                             f"⬇️ Download {clip_path.name}",
