@@ -91,6 +91,7 @@ def save_uploaded_video(uploaded_file):
     total = max(int(uploaded_file.size), 1)
     progress = st.progress(0, text="Saving original video without compression...")
     written = 0
+    save_started = time.time()
     with open(destination, "wb") as target:
         while True:
             chunk = uploaded_file.read(8 * 1024 * 1024)
@@ -98,8 +99,10 @@ def save_uploaded_video(uploaded_file):
                 break
             target.write(chunk)
             written += len(chunk)
-            progress.progress(min(written / total, 1.0),
-                              text="Saving original video without compression...")
+            fraction = min(written / total, 1.0)
+            elapsed = time.time() - save_started
+            eta = (elapsed / max(fraction, 0.01)) * (1 - fraction)
+            progress.progress(fraction, text=f"Saving original video: {fraction * 100:.1f}% · approx. {_format_wait(eta)} remaining")
     progress.empty()
     return destination
 
@@ -891,6 +894,8 @@ def analyse_video(video_path, checkpoint_file, category):
 
     progress = st.progress(min(next_idx / max(len(sample_times), 1), 1.0),
                            text="Multi-signal video analysis resume ho raha hai...")
+    analysis_started = time.time()
+    completed_before = next_idx
     for idx in range(next_idx, len(sample_times)):
         timestamp = sample_times[idx]
         cap.set(cv2.CAP_PROP_POS_MSEC, float(timestamp * 1000))
@@ -913,8 +918,12 @@ def analyse_video(video_path, checkpoint_file, category):
                 "previous_hist": previous_hist.tolist() if previous_hist is not None else None
             })
         if idx % 5 == 0 or idx == len(sample_times) - 1:
-            progress.progress(min((idx + 1) / len(sample_times), 1.0),
-                              text=f"Video analyse ho rahi hai... {idx + 1}/{len(sample_times)}")
+            fraction = (idx + 1) / max(len(sample_times), 1)
+            processed_now = idx + 1 - completed_before
+            elapsed = time.time() - analysis_started
+            remaining = max(0, len(sample_times) - (idx + 1))
+            eta = (elapsed / max(processed_now, 1)) * remaining
+            progress.progress(fraction, text=f"Video analysis: {fraction * 100:.1f}% · {idx + 1}/{len(sample_times)} samples · approx. {_format_wait(eta)} remaining")
     cap.release()
     progress.empty()
 
