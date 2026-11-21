@@ -389,7 +389,7 @@ def show_video_metadata(metadata):
     st.code(' '.join(metadata.get('hashtags', [])))
 
 def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
-    """Upload clips in resumable chunks and persist each successful YouTube ID."""
+    """Upload clips in resumable chunks and keep visible per-clip status."""
     try:
         with open(status_path, "r", encoding="utf-8") as file:
             uploaded = json.load(file)
@@ -401,9 +401,11 @@ def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
     results = []
     total_clips = len(clip_paths)
     if total_clips == 0:
+        st.info("Upload ke liye koi clip nahi mili.")
         return results
 
-    progress = st.progress(0, text="YouTube upload prepare ho raha hai...")
+    status_box = st.status("⏳ YouTube par clips upload ho rahi hain...", expanded=True)
+    progress = st.progress(0, text=f"Upload starting · 0/{total_clips} clips")
     try:
         for index, clip_path in enumerate(clip_paths, start=1):
             clip_path = Path(clip_path)
@@ -411,11 +413,15 @@ def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
                 raise RuntimeError(f"{clip_path.name} missing hai ya empty hai.")
 
             if clip_path.name in uploaded:
-                results.append((clip_path.name, uploaded[clip_path.name], "already uploaded"))
+                video_id = uploaded[clip_path.name]
+                results.append((clip_path.name, video_id, "already uploaded"))
+                status_box.write(f"✅ **{clip_path.name}** — Pehle se YouTube par upload ho chuki hai.")
+                status_box.write(f"https://www.youtube.com/watch?v={video_id}")
                 progress.progress(index / total_clips,
-                                  text=f"Already uploaded: {index}/{total_clips}")
+                                  text=f"Completed · {index}/{total_clips} clips")
                 continue
 
+            status_box.write(f"🔄 **{clip_path.name}** — Upload ho rahi hai...")
             body = {
                 "snippet": {
                     "title": ((metadata or {}).get("title") or
@@ -447,13 +453,13 @@ def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
             while response is None:
                 chunk_status, response = request.next_chunk(num_retries=3)
                 if chunk_status is not None:
+                    clip_percent = int(chunk_status.progress() * 100)
                     overall_progress = (
                         (index - 1) + float(chunk_status.progress())
                     ) / total_clips
-                    percent = int(chunk_status.progress() * 100)
                     progress.progress(
                         min(overall_progress, 1.0),
-                        text=f"Uploading {clip_path.name}: {percent}% · clip {index}/{total_clips}"
+                        text=f"Uploading {clip_path.name}: {clip_percent}% · clip {index}/{total_clips}"
                     )
 
             video_id = response.get("id") if response else None
@@ -463,11 +469,17 @@ def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
             uploaded[clip_path.name] = video_id
             save_json_atomic(status_path, uploaded)
             results.append((clip_path.name, video_id, "uploaded"))
+            status_box.write(f"✅ **{clip_path.name}** — YouTube par upload complete!")
+            status_box.write(f"https://www.youtube.com/watch?v={video_id}")
             progress.progress(
                 index / total_clips,
-                text=f"Uploaded {index}/{total_clips} clips successfully"
+                text=f"Uploaded · {index}/{total_clips} clips complete"
             )
+
+        status_box.update(label=f"✅ YouTube upload complete — {len(results)}/{total_clips} clips", state="complete", expanded=True)
+        progress.progress(1.0, text=f"✅ All {total_clips} clips uploaded or already uploaded.")
     except Exception as error:
+        status_box.update(label="⚠️ YouTube upload ruk gaya — neeche status dekho.", state="error", expanded=True)
         error_text = str(error)
         if "quotaExceeded" in error_text:
             raise RuntimeError("YouTube API quota limit hit hui. Quota reset hone ke baad pending clips upload karo.") from error
@@ -476,11 +488,8 @@ def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
         if "invalid_grant" in error_text or "invalid credentials" in error_text.lower():
             raise RuntimeError("Google session expire ho gayi. YouTube ko disconnect karke dobara connect karo.") from error
         raise RuntimeError(f"YouTube upload ruk gaya: {error_text[:500]}") from error
-    finally:
-        progress.empty()
 
     return results
-
 
 
 def save_json_atomic(path, data):
