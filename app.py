@@ -502,12 +502,12 @@ def save_json_atomic(path, data):
 # Handle the Google redirect only after all helper functions are defined.
 handle_youtube_oauth_callback()
 
-def get_job_dir(video_path, clip_seconds, number_of_clips, vertical, category):
+def get_job_dir(video_path, vertical, category):
     digest = hashlib.sha256()
     with open(video_path, "rb") as source:
         for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""):
             digest.update(chunk)
-    settings = f"{clip_seconds}|{number_of_clips}|{int(vertical)}|{category}"
+    settings = f"auto-variable-duration-v1|{int(vertical)}|{category}"
     job_id = hashlib.sha256((digest.hexdigest() + settings).encode()).hexdigest()[:20]
     folder = UPLOAD_DIR / "processing_jobs" / job_id
     folder.mkdir(parents=True, exist_ok=True)
@@ -582,7 +582,8 @@ def extract_audio_activity(video_path, sample_times):
     except Exception:
         return np.zeros(len(sample_times), dtype=np.float32)
 
-def analyse_video(video_path, clip_seconds, number_of_clips, checkpoint_file, category):
+def analyse_video(video_path, checkpoint_file, category):
+    """Detect highlight-like moments and choose a separate 10-180 second duration."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise ValueError("Video open nahi ho paayi. MP4 file try karo.")
@@ -592,16 +593,15 @@ def analyse_video(video_path, clip_seconds, number_of_clips, checkpoint_file, ca
         cap.release()
         raise ValueError("Video ka FPS ya duration read nahi ho paaya.")
     duration = frame_count / fps
-    if duration < clip_seconds:
+    if duration < 10:
         cap.release()
-        raise ValueError(f"Video sirf {duration:.1f} seconds ki hai. Clip length kam select karo.")
+        raise ValueError("Video kam se kam 10 seconds ki honi chahiye.")
 
     sample_times = np.arange(0, duration, 0.5)
     audio_scores = extract_audio_activity(video_path, sample_times)
     previous, previous_hist = None, None
     motion_scores, scene_scores, score_times = [], [], []
     next_idx = 0
-
     if os.path.exists(checkpoint_file):
         try:
             with open(checkpoint_file, "r", encoding="utf-8") as file:
@@ -637,7 +637,6 @@ def analyse_video(video_path, clip_seconds, number_of_clips, checkpoint_file, ca
                 scene_scores.append(float(np.abs(previous_hist - hist).sum() / 2.0))
                 score_times.append(float(timestamp))
             previous, previous_hist = gray, hist
-
         if (idx + 1) % 10 == 0 or idx == len(sample_times) - 1:
             save_json_atomic(checkpoint_file, {
                 "next_idx": idx + 1, "motion_scores": motion_scores,
@@ -659,7 +658,6 @@ def analyse_video(video_path, clip_seconds, number_of_clips, checkpoint_file, ca
     if len(audio) < len(score_times):
         audio = np.pad(audio, (0, len(score_times) - len(audio)))
     audio = np.asarray(audio, dtype=np.float32)
-
     profiles = {
         "Auto (all categories)": (0.40, 0.30, 0.30),
         "Gaming": (0.55, 0.15, 0.30),
@@ -673,51 +671,78 @@ def analyse_video(video_path, clip_seconds, number_of_clips, checkpoint_file, ca
     w_motion, w_scene, w_audio = profiles.get(category, profiles["Auto (all categories)"])
     combined = motion * w_motion + scene * w_scene + audio * w_audio
 
-    starts = np.arange(0, max(0, duration - clip_seconds) + 0.001, 0.5)
-    candidates, time_array = [], np.asarray(score_times)
-    for start_time in starts:
-        mask = (time_array >= start_time) & (time_array < start_time + clip_seconds)
-        if np.any(mask):
-            candidates.append((float(combined[mask].mean()), float(start_time)))
-    candidates.sort(reverse=True)
+    # Smooth the signal and bridge short quiet gaps to keep a complete moment together.
+    smoothed = np.convolve(combined, np.ones(7, dtype=np.float32) / 7, mode="same")
+    threshold = max(float(np.percentile(smoothed, 72)),
+                    float(np.mean(smoothed) + 0.20 * np.std(smoothed)))
+    active_indices = np.flatnonzero(smoothed >= threshold)
+    groups = []
+    if active_indices.size:
+        group_start = previous_idx = int(active_indices[0])
+        for current_idx in active_indices[1:]:
+            current_idx = int(current_idx)
+            if current_idx - previous_idx > 12:
+                groups.append((group_start, previous_idx))
+                group_start = current_idx
+            previous_idx = current_idx
+        groups.append((group_start, previous_idx))
+
+    times = np.asarray(score_times, dtype=np.float32)
+    sample_step = float(np.median(np.diff(times))) if len(times) > 1 else 0.5
+    candidates = []
+    for first_idx, last_idx in groups:
+        start_time = max(0.0, float(times[first_idx]) - 3.0)
+        end_time = min(duration, float(times[last_idx]) + sample_step + 3.0)
+        if end_time - start_time < 10.0:
+            center = (start_time + end_time) / 2.0
+            start_time = max(0.0, center - 5.0)
+            end_time = min(duration, start_time + 10.0)
+            start_time = max(0.0, end_time - 10.0)
+        cursor = start_time
+        while end_time - cursor > 180.0:
+            piece_end = cursor + 180.0
+            mask = (times >= cursor) & (times < piece_end)
+            score = float(np.mean(combined[mask])) if np.any(mask) else 0.0
+            candidates.append((score, cursor, piece_end))
+            cursor = piece_end
+        if end_time - cursor >= 10.0:
+            mask = (times >= cursor) & (times <= end_time)
+            score = float(np.mean(combined[mask])) if np.any(mask) else 0.0
+            candidates.append((score, cursor, end_time))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
     chosen = []
-    for score, start_time in candidates:
-        end_time = start_time + clip_seconds
-        if all(end_time <= old_start or start_time >= old_start + clip_seconds
-               for _, old_start in chosen):
-            chosen.append((score, start_time))
-        if len(chosen) >= number_of_clips:
-            break
+    for score, start_time, end_time in candidates:
+        if all(end_time <= old_start or start_time >= old_end
+               for _, old_start, old_end in chosen):
+            chosen.append((score, start_time, end_time))
     try:
         os.remove(checkpoint_file)
     except FileNotFoundError:
         pass
     return duration, sorted(chosen, key=lambda item: item[1])
 
-def export_clips(video_path, chosen, clip_seconds, vertical, output_dir):
+
+def export_clips(video_path, chosen, vertical, output_dir):
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     os.makedirs(output_dir, exist_ok=True)
     outputs = []
     progress = st.progress(0, text="Clips export ho rahi hain...")
-    for index, (score, start_time) in enumerate(chosen, start=1):
+    for index, (score, start_time, end_time) in enumerate(chosen, start=1):
         output_path = os.path.join(output_dir, f"Gaming_Short_{index}.mp4")
         if os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
             outputs.append(output_path)
             progress.progress(index / len(chosen),
                               text=f"Saved clip reuse ho rahi hai... {index}/{len(chosen)}")
             continue
-
-        # Remove an incomplete file left by an interrupted export.
         if os.path.exists(output_path):
             os.remove(output_path)
-
+        clip_duration = end_time - start_time
         command = [
             ffmpeg, "-y", "-ss", f"{start_time:.3f}", "-i", str(video_path),
-            "-t", str(clip_seconds), "-map", "0:v:0", "-map", "0:a?"
+            "-t", f"{clip_duration:.3f}", "-map", "0:v:0", "-map", "0:a?"
         ]
         if vertical:
-            # Fit the complete frame inside a 9:16 canvas; never crop.
-            # Scale up/down as needed and fill unused space with black bars.
             command += ["-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"]
         command += [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
@@ -727,7 +752,7 @@ def export_clips(video_path, chosen, clip_seconds, vertical, output_dir):
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode != 0:
             details = result.stderr[-1800:] if result.stderr else "Unknown FFmpeg error"
-            raise RuntimeError(f"Clip {index} export nahi hui:\n{details}")
+            raise RuntimeError(f"Clip {index} export nahi hui:\\n{details}")
         outputs.append(output_path)
         progress.progress(index / len(chosen), text=f"Clips export ho rahi hain... {index}/{len(chosen)}")
     progress.empty()
@@ -740,15 +765,14 @@ with st.sidebar:
         st.rerun()
     st.divider()
     st.header("⚙️ Clip settings")
-    clip_seconds = st.slider("Har clip ki length (seconds)", 10, 60, 20, 5)
-    number_of_clips = st.slider("Kitni clips banani hain?", 1, 20, 10)
+    st.info("Smart Auto Clipping: har moment ki duration automatically choose hogi (10 seconds se maximum 3 minutes). Koi fixed clip-count limit nahi hai.")
     vertical = st.checkbox("9:16 YouTube Shorts format", value=True)
     category = st.selectbox(
         "Video category",
         ["Auto (all categories)", "Gaming", "Sports", "Vlog / Travel",
          "Podcast / Talking", "Education / Tutorial", "Reaction / Comedy", "Other"]
     )
-    st.caption("Highlights visual movement, scene changes aur audio activity se rank hote hain. Ye abhi semantic understanding ya custom-trained model nahi hai.")
+    st.caption("Moment detection visual movement, scene changes aur audio activity par based hai; abhi kills/clutches ko semantically samajhne wala trained model nahi hai.")
     st.divider()
     st.header("✨ AI video metadata")
     st.text_input(
@@ -910,7 +934,7 @@ else:
     if selected_path and selected_path.exists():
         st.success(f"Selected video: {selected_path.name}")
         st.video(str(selected_path))
-        job_dir = get_job_dir(selected_path, clip_seconds, number_of_clips, vertical, category)
+        job_dir = get_job_dir(selected_path, vertical, category)
         st.session_state.last_job_dir = str(job_dir)
         checkpoint_file = str(job_dir / "analysis_checkpoint.json")
         analysis_file = job_dir / "analysis.json"
@@ -933,26 +957,31 @@ else:
                         with open(analysis_file, "r", encoding="utf-8") as file:
                             saved_analysis = json.load(file)
                         duration = float(saved_analysis["duration"])
-                        chosen = [(float(item[0]), float(item[1])) for item in saved_analysis["chosen"]]
-                        st.success("Saved analysis loaded. Analysis dobara nahi chalegi.")
+                        chosen = [(float(item[0]), float(item[1]), float(item[2]))
+                                  for item in saved_analysis["chosen"] if len(item) >= 3]
+                        if not chosen:
+                            raise ValueError("Saved analysis purane format mein hai. Fresh processing start karo.")
+                        st.success("Saved variable-duration analysis loaded. Analysis dobara nahi chalegi.")
                     else:
                         duration, chosen = analyse_video(
-                            selected_path, clip_seconds, number_of_clips, checkpoint_file, category
+                            selected_path, checkpoint_file, category
                         )
                         if not chosen:
-                            st.error("Is video mein selected length ke clips nahi mil paaye.")
+                            st.error("Is video mein enough clear highlight moments detect nahi hue. Different gameplay video try karo.")
                         else:
                             save_json_atomic(analysis_file, {
                                 "duration": duration,
                                 "category": category,
-                                "chosen": [[score, start_time] for score, start_time in chosen]
+                                "mode": "variable_duration",
+                                "chosen": [[score, start_time, end_time]
+                                           for score, start_time, end_time in chosen]
                             })
                     if chosen:
                         st.subheader("⭐ Selected gameplay moments")
-                        for i, (score, start_time) in enumerate(chosen, 1):
-                            st.write(f"**Clip {i}:** {start_time:.1f}s – {start_time + clip_seconds:.1f}s · Movement score: {score:.2f}")
+                        for i, (score, start_time, end_time) in enumerate(chosen, 1):
+                            st.write(f"**Clip {i}:** {start_time:.1f}s – {end_time:.1f}s · Duration: {end_time - start_time:.1f}s · Highlight score: {score:.2f}")
                         outputs = export_clips(
-                            selected_path, chosen, clip_seconds, vertical, output_dir
+                            selected_path, chosen, vertical, output_dir
                         )
                         st.success(f"{len(outputs)} clips ready! Progress saved hai.")
                         try:
