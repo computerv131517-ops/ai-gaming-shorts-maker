@@ -2,6 +2,7 @@ import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import shutil
 import tempfile
 import zipfile
@@ -463,7 +464,7 @@ def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
     try:
         next_publish = get_next_youtube_publish_time(youtube)
         status_box.write(
-            f"📅 First available slot: {next_publish.astimezone().strftime('%d %b %Y, %I:%M %p %Z')}"
+            f"📅 First available slot: {next_publish.astimezone(ZoneInfo('Asia/Kolkata')).strftime('%d %b %Y, %I:%M %p IST')}"
         )
         for index, clip_path in enumerate(clip_paths, start=1):
             clip_path = Path(clip_path)
@@ -482,7 +483,7 @@ def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
                 continue
 
             publish_at = next_publish.isoformat(timespec="seconds").replace("+00:00", "Z")
-            local_slot = next_publish.astimezone().strftime("%d %b %Y, %I:%M %p %Z")
+            local_slot = next_publish.astimezone(ZoneInfo("Asia/Kolkata")).strftime("%d %b %Y, %I:%M %p IST")
             status_box.write(f"🔄 **{clip_path.name}** — Upload ho rahi hai; publish slot: **{local_slot}**")
             body = {
                 "snippet": {
