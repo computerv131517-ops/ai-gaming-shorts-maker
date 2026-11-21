@@ -976,7 +976,7 @@ def export_clips(video_path, chosen, vertical, output_dir, captions_path=None):
             video_filter = (
                 "scale=1080:1920:force_original_aspect_ratio=decrease,"
                 "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,"
-                "fps=30,zoompan=z='min(zoom+0.00012,1.045)':d=1:"
+                "fps=30,zoompan=z='min(zoom+0.00012,1.045)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:"
                 "s=1080x1920:fps=30,eq=contrast=1.06:saturation=1.12:brightness=0.01"
             )
         else:
@@ -994,12 +994,11 @@ def export_clips(video_path, chosen, vertical, output_dir, captions_path=None):
             )
 
         command = [
-            ffmpeg, "-y", "-ss", f"{start_time:.3f}", "-i", str(video_path),
-            "-t", f"{clip_duration:.3f}"
+            ffmpeg, "-y", "-ss", f"{start_time:.3f}", "-i", str(video_path)
         ]
         if has_audio:
             command += ["-i", str(whoosh_path)]
-        command += ["-map", "0:v:0", "-vf", video_filter]
+        command += ["-t", f"{clip_duration:.3f}", "-map", "0:v:0", "-vf", video_filter]
         if has_audio:
             command += [
                 "-filter_complex",
