@@ -1078,15 +1078,13 @@ if st.button("🆕 Updates & Commit History", use_container_width=True):
 if st.session_state.show_update_history:
     st.markdown("### Website updates")
     st.markdown("""
-    **Latest update — 15 Nov 2026**\n\n    - Added public video URL fetching for supported platforms (YouTube, Vimeo, Dailymotion, Twitch and Streamable); link fetching does not start clipping automatically.
+    **Latest update — 21 Nov 2026**\\n\\n    - Added public video URL fetching for supported platforms (YouTube, Vimeo, Dailymotion, Twitch and Streamable); link fetching does not start clipping automatically.
 
-    - Added Google OAuth connection for YouTube and private uploads of generated Shorts; automatic uploads are opt-in.
+    - Added Google OAuth connection for YouTube and private uploads of generated Shorts. Automatic upload can be controlled from the sidebar; manual upload is also available.
 
-    - Added full-video AI analysis for one shared YouTube title, description and hashtags across all clips (Gemini API key can be entered in the sidebar for the active session or configured in Streamlit Secrets).\n    - Added category-aware highlight ranking for gaming, sports, vlog/travel, podcast/talking, education/tutorial, reaction/comedy and other videos.
-    - Highlight scoring combines visual movement, scene changes and audio activity.
-    - Original source video is deleted after the first generated clip or ZIP download. Generated clips appear in Clip History for 1 hour with individual and ZIP download options, then are cleaned up when history is checked.
-    - 9:16 output uses full-frame fit with black background; no cropping.
-    - Added resumable analysis checkpoints and reuse of completed clips.
+    - Fixed YouTube uploads to use resumable chunk transfers, show progress, retry temporary request failures, and save each successful video ID so retries do not re-upload completed clips.
+
+    - Kept generated videos private on YouTube by default.
 
     **Git commit message:** `Add public video URL import`\n\n    **Previous feature commit:** `Add category-aware multi-signal highlight detection`
 
