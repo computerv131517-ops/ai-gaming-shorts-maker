@@ -908,7 +908,7 @@ def _write_clip_srt(captions_path, clip_start, clip_end, srt_path):
         try:
             start = max(float(caption["start_seconds"]), clip_start)
             end = min(float(caption["end_seconds"]), clip_end)
-            caption_text = re.sub(r"[\\r\\n]+", " ", str(caption.get("text", ""))).strip()
+            caption_text = re.sub(r"[\r\n]+", " ", str(caption.get("text", ""))).strip()
         except (KeyError, TypeError, ValueError):
             continue
         if caption_text and end > start:
@@ -917,7 +917,7 @@ def _write_clip_srt(captions_path, clip_start, clip_end, srt_path):
         return False
     with open(srt_path, "w", encoding="utf-8") as file:
         for index, (start, end, caption_text) in enumerate(entries, 1):
-            file.write(f"{index}\\n{_srt_timestamp(start)} --> {_srt_timestamp(end)}\\n{caption_text}\\n\\n")
+            file.write(f"{index}\n{_srt_timestamp(start)} --> {_srt_timestamp(end)}\n{caption_text}\n\n")
     return True
 
 
@@ -981,7 +981,7 @@ def export_clips(video_path, chosen, vertical, output_dir, captions_path=None):
             )
         else:
             video_filter = (
-                "fps=30,zoompan=z='min(zoom+0.00012,1.045)':d=1:"
+                "fps=30,zoompan=z='min(zoom+0.00012,1.045)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:"
                 "s=1920x1080:fps=30,eq=contrast=1.06:saturation=1.12:brightness=0.01"
             )
         if has_captions:
