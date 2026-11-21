@@ -714,8 +714,10 @@ def analyse_video_with_gemini(video_path, duration, category, captions_path=None
             wait_status.update(label=f"⏳ Gemini gameplay processing... · elapsed {elapsed_text} · exact % available nahi hai", state="running")
             time.sleep(5)
             uploaded_file = client.files.get(name=uploaded_file.name)
-        wait_status.update(label="✅ Gemini gameplay processing complete", state="complete")
+        wait_status.update(label="✅ Gemini video upload/processing complete", state="complete")
 
+        ai_status = st.status("🧠 Gemini ab highlights, reactions aur captions analyse kar raha hai... API response ka wait ho raha hai.", expanded=True)
+        ai_started = time.time()
         prompt = f"""
 You are an expert gameplay highlight editor. Watch and understand the ENTIRE video,
 including visual events, game context, reactions and available audio.
@@ -763,10 +765,13 @@ Return ONLY valid JSON in this exact structure:
 "captions":[{{"start_seconds":13.1,"end_seconds":14.8,"text":"No way, that was close!"}}]}}
 If no genuinely strong moments exist, return {{"highlights":[],"captions":[]}}.
 """
+        ai_status.write("Video analysis request bhej di gayi hai. Gemini ka response aane tak wait karein; is stage ka exact percentage provider nahi deta.")
         response = client.models.generate_content(
             model="gemini-3.8-flash",
             contents=[uploaded_file, prompt]
         )
+        ai_elapsed = _format_wait(time.time() - ai_started)
+        ai_status.update(label=f"✅ Gemini highlight analysis response aa gaya · {ai_elapsed}", state="complete")
         raw = (response.text or "").strip()
         if raw.startswith("\x60\x60\x60"):
             raw = raw.split("\n", 1)[-1].rsplit("\x60\x60\x60", 1)[0].strip()
