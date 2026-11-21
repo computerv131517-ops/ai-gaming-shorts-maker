@@ -432,6 +432,12 @@ def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
                         " ".join((metadata or {}).get("hashtags", []))
                     )[:5000],
                     "categoryId": "20",
+                    # YouTube's dedicated tags field uses plain keywords, without #.
+                    "tags": [
+                        str(tag).strip().lstrip("#")
+                        for tag in ((metadata or {}).get("hashtags", []) or [])
+                        if str(tag).strip()
+                    ][:30],
                 },
                 "status": {
                     "privacyStatus": "private",
