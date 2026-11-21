@@ -170,6 +170,43 @@ def ffmpeg_escape(path):
     return str(path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'").replace(",", "\\,")
 
 
+def generate_ai_thumbnail(client, clip_path, output_path, title_hint):
+    """Generate a truthful 16:9 thumbnail from a real frame in this clip."""
+    capture = cv2.VideoCapture(str(clip_path))
+    if not capture.isOpened():
+        return False
+    frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    capture.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(frame_count * 0.45)))
+    ok, frame = capture.read()
+    capture.release()
+    if not ok:
+        return False
+    frame = cv2.resize(frame, (960, 540), interpolation=cv2.INTER_AREA)
+    ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    if not ok:
+        return False
+    from google.genai import types
+    prompt = (
+        "Create a polished 16:9 YouTube gaming thumbnail using this real gameplay frame "
+        "as the visual reference. Make the actual action clear, cinematic, vibrant and crisp. "
+        "Do not add text, logos, watermarks, fake characters, fake UI or events not shown. "
+        "Context: " + str(title_hint)[:180]
+    )
+    response = client.models.generate_content(
+        model="gemini-3.1-flash-image",
+        contents=[prompt, types.Part.from_bytes(data=encoded.tobytes(), mime_type="image/jpeg")],
+        config=types.GenerateContentConfig(
+            response_modalities=["IMAGE"],
+            image_config=types.ImageConfig(aspect_ratio="16:9", image_size="1K"),
+        ),
+    )
+    for part in response.parts:
+        if getattr(part, "inline_data", None):
+            part.as_image().save(str(output_path))
+            return output_path.is_file() and output_path.stat().st_size > 2048
+    return False
+
+
 def render_clip(ffmpeg, source, output, start, end, captions, index, metadata, tmpdir):
     length = end - start
     srt = tmpdir / f"captions_{index}.srt"
@@ -297,7 +334,15 @@ def run(job):
                 ffmpeg, source, output, start, end, captions, index, metadata, tmpdir
             )
             total_caption_count += caption_count
-            set_status(job, "uploading", f"{output.name} private storage mein save ho rahi hai.")
+            set_status(job, "running", f"{output.name} ka AI thumbnail generate ho raha hai.")
+            thumbnail = tmpdir / f"Gaming_Short_{index}_AI_Thumbnail.jpg"
+            try:
+                made_thumbnail = generate_ai_thumbnail(
+                    client, output, thumbnail, metadata.get("title", event)
+                )
+            except Exception:
+                made_thumbnail = False
+            set_status(job, "uploading", f"{output.name} aur uska thumbnail private storage mein save ho rahe hain.")
             with output.open("rb") as video:
                 api(
                     "POST", remote(job, "clips/" + output.name),
@@ -305,6 +350,14 @@ def run(job):
                     data=video
                 )
             names.append("clips/" + output.name)
+            if made_thumbnail:
+                with thumbnail.open("rb") as image_file:
+                    api(
+                        "POST", remote(job, "thumbnails/" + thumbnail.name),
+                        headers={"Content-Type": "image/jpeg", "x-upsert": "true"},
+                        data=image_file
+                    )
+                thumbnail_names.append("thumbnails/" + thumbnail.name)
 
         # Keep metadata and a text transcript alongside the private rendered clips.
         api(
@@ -320,7 +373,7 @@ def run(job):
                 "9:16 vertical framing", "AI speech captions burned into video",
                 "Smart zoom", "Colour enhancement", "Audio loudness enhancement",
                 "Original synthetic whoosh and impact sound effects",
-                "Like and Subscribe footer", "AI title, description and hashtags"
+                "Like and Subscribe footer", "AI title, description and hashtags", "AI-generated 16:9 thumbnails"
             ]
         )
 
