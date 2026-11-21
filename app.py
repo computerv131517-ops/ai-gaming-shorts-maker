@@ -1746,6 +1746,20 @@ else:
                 st.info(bg_status.get("message", "Status available hai."))
                 if state == "completed":
                     st.success(f"{bg_status.get('clip_count', len(st.session_state.get('background_local_clips', [])))} Shorts ready hain.")
+                    bg_metadata = bg_status.get("metadata", {})
+                    if bg_metadata:
+                        st.markdown("### AI-generated YouTube metadata")
+                        st.write("**Title:**", bg_metadata.get("title", ""))
+                        st.write("**Description:**", bg_metadata.get("description", ""))
+                        hashtags = bg_metadata.get("hashtags", [])
+                        tags = bg_metadata.get("tags", [])
+                        if hashtags:
+                            st.write("**Hashtags:**", " ".join(str(tag) for tag in hashtags))
+                        if tags:
+                            st.write("**Tags:**", ", ".join(str(tag) for tag in tags))
+                    features = bg_status.get("editing_features", [])
+                    if features:
+                        st.caption("Editing applied: " + " · ".join(features))
                     for clip_string in st.session_state.get("background_local_clips", []):
                         clip_path = Path(clip_string)
                         if clip_path.exists():
