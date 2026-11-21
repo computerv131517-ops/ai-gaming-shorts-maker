@@ -12,6 +12,8 @@ import hmac
 import secrets
 import random
 import json
+import uuid
+import requests
 from pathlib import Path
 from urllib.parse import urlparse
 import yt_dlp
@@ -55,6 +57,8 @@ if "page" not in st.session_state:
     st.session_state.page = "upload"
 if "selected_video" not in st.session_state:
     st.session_state.selected_video = ""
+if "background_job_id" not in st.session_state:
+    st.session_state.background_job_id = st.query_params.get("bg_job", "")
 
 UPLOAD_RETENTION_SECONDS = 60 * 60  # Automatically remove saved source videos after 1 hour.
 
@@ -125,6 +129,84 @@ def _format_wait(seconds):
     seconds = max(0, int(seconds))
     minutes, secs = divmod(seconds, 60)
     return f"{minutes}m {secs}s" if minutes else f"{secs}s"
+
+
+
+def background_config():
+    """Read private worker credentials from Streamlit Cloud Secrets."""
+    try:
+        return {
+            "supabase_url": str(st.secrets.get("SUPABASE_URL", "")).strip().rstrip("/"),
+            "supabase_key": str(st.secrets.get("SUPABASE_SECRET_KEY", "")).strip(),
+            "github_token": str(st.secrets.get("GITHUB_TOKEN", "")).strip(),
+        }
+    except Exception:
+        return {"supabase_url": "", "supabase_key": "", "github_token": ""}
+
+
+def background_headers(config):
+    key = config["supabase_key"]
+    return {"apikey": key, "Authorization": "Bearer " + key}
+
+
+def submit_background_job(video_path, category):
+    """Upload the source to private Supabase Storage and dispatch one GitHub runner."""
+    config = background_config()
+    if not all(config.values()):
+        raise RuntimeError("Background worker secrets missing hain. Streamlit Secrets mein SUPABASE_URL, SUPABASE_SECRET_KEY aur GITHUB_TOKEN check karo.")
+    job_id = uuid.uuid4().hex
+    object_path = f"jobs/{job_id}/input.mp4"
+    upload_url = config["supabase_url"] + "/storage/v1/object/gaming-videos/" + object_path
+    headers = background_headers(config)
+    headers.update({"Content-Type": "video/mp4", "x-upsert": "true"})
+    size = Path(video_path).stat().st_size
+    with open(video_path, "rb") as source:
+        response = requests.post(upload_url, headers=headers, data=source, timeout=(30, 1800))
+    response.raise_for_status()
+
+    dispatch_url = "https://api.github.com/repos/computerv131517-ops/ai-gaming-shorts-maker/actions/workflows/process-video.yml/dispatches"
+    github_headers = {
+        "Authorization": "Bearer " + config["github_token"],
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    dispatch = requests.post(
+        dispatch_url, headers=github_headers,
+        json={"ref": "main", "inputs": {"job_id": job_id, "category": str(category)}},
+        timeout=30
+    )
+    if dispatch.status_code not in (200, 201, 204):
+        raise RuntimeError(f"GitHub worker start nahi hua (HTTP {dispatch.status_code}): {dispatch.text[:350]}")
+    return job_id, size
+
+
+def fetch_background_status(job_id):
+    config = background_config()
+    if not config["supabase_url"] or not config["supabase_key"]:
+        raise RuntimeError("Supabase Secrets missing hain.")
+    url = config["supabase_url"] + f"/storage/v1/object/authenticated/gaming-videos/jobs/{job_id}/status.json"
+    response = requests.get(url, headers=background_headers(config), timeout=30)
+    if response.status_code == 404:
+        return {"state": "queued", "message": "Worker start hone ka wait ho raha hai."}
+    response.raise_for_status()
+    return response.json()
+
+
+def download_background_clips(job_id, clip_paths):
+    config = background_config()
+    target_dir = UPLOAD_DIR / "background_jobs" / job_id / "clips"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    downloaded = []
+    for remote_path in clip_paths:
+        name = Path(remote_path).name
+        destination = target_dir / name
+        if not destination.exists():
+            url = config["supabase_url"] + f"/storage/v1/object/authenticated/gaming-videos/jobs/{job_id}/clips/{name}"
+            response = requests.get(url, headers=background_headers(config), timeout=(30, 900))
+            response.raise_for_status()
+            destination.write_bytes(response.content)
+        downloaded.append(destination)
+    return downloaded
 
 
 def download_video_from_url(video_url):
@@ -1629,6 +1711,55 @@ else:
 
         if has_saved_work:
             st.info(f"Saved progress found. {len(existing_clips)} completed clip(s) are already محفوظ.")
+
+        st.divider()
+        st.subheader("☁️ Background processing")
+        st.caption("Is option se video private storage mein upload hogi. GitHub worker browser band hone ke baad bhi job complete karega; result dekhne ke liye isi app par wapas aakar status refresh karna.")
+        if st.button("🚀 Start Background Processing", key="start_background_job", use_container_width=True):
+            try:
+                with st.spinner("Video private storage par upload ho rahi hai aur worker start ho raha hai..."):
+                    bg_id, bg_size = submit_background_job(selected_path, category)
+                st.session_state.background_job_id = bg_id
+                st.query_params["bg_job"] = bg_id
+                st.success(f"Background job start ho gayi. Job ID: {bg_id}")
+            except Exception as bg_error:
+                st.error(f"Background job start nahi hui: {str(bg_error)[:600]}")
+
+        bg_job_id = st.session_state.get("background_job_id") or st.query_params.get("bg_job", "")
+        if bg_job_id:
+            st.caption(f"Current background job: {bg_job_id}")
+            if st.button("🔄 Refresh Background Job Status", key="refresh_background_status", use_container_width=True):
+                try:
+                    bg_status = fetch_background_status(bg_job_id)
+                    st.session_state.background_job_status = bg_status
+                    if bg_status.get("state") == "completed":
+                        paths = bg_status.get("clips", [])
+                        st.session_state.background_clip_paths = [str(p) for p in paths]
+                        local_clips = download_background_clips(bg_job_id, paths)
+                        st.session_state.background_local_clips = [str(p) for p in local_clips]
+                except Exception as status_error:
+                    st.error(f"Status/result fetch nahi ho paaya: {str(status_error)[:500]}")
+            bg_status = st.session_state.get("background_job_status", {})
+            if bg_status:
+                state = bg_status.get("state", "unknown")
+                st.write(f"**Status:** {state.upper()}")
+                st.info(bg_status.get("message", "Status available hai."))
+                if state == "completed":
+                    st.success(f"{bg_status.get('clip_count', len(st.session_state.get('background_local_clips', [])))} Shorts ready hain.")
+                    for clip_string in st.session_state.get("background_local_clips", []):
+                        clip_path = Path(clip_string)
+                        if clip_path.exists():
+                            with st.expander(clip_path.name, expanded=False):
+                                st.video(str(clip_path))
+                                st.download_button(
+                                    f"⬇️ Download {clip_path.name}",
+                                    data=clip_path.read_bytes(),
+                                    file_name=clip_path.name,
+                                    mime="video/mp4",
+                                    key=f"bg_download_{bg_job_id}_{clip_path.name}"
+                                )
+                elif state == "failed":
+                    st.error("Worker fail hua. Status message mein error detail dekho.")
         col1, col2 = st.columns(2)
         with col1:
             if st.button("← Back to Uploads", use_container_width=True):
