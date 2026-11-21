@@ -675,7 +675,9 @@ def analyse_video(video_path, checkpoint_file, category):
     smoothed = np.convolve(combined, np.ones(7, dtype=np.float32) / 7, mode="same")
     threshold = max(float(np.percentile(smoothed, 72)),
                     float(np.mean(smoothed) + 0.20 * np.std(smoothed)))
-    active_indices = np.flatnonzero(smoothed >= threshold)
+    # A completely flat signal is not evidence of a highlight.
+    active_indices = (np.flatnonzero(smoothed >= threshold)
+                      if float(np.std(smoothed)) >= 1e-6 else np.array([], dtype=int))
     groups = []
     if active_indices.size:
         group_start = previous_idx = int(active_indices[0])
