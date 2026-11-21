@@ -327,6 +327,7 @@ def run(job):
             clip_count=len(chosen), metadata=metadata
         )
         names = []
+        thumbnail_names = []
         total_caption_count = 0
         for index, (_, start, end, event) in enumerate(chosen, 1):
             output = outdir / f"Gaming_Short_{index}.mp4"
@@ -368,7 +369,7 @@ def run(job):
         set_status(
             job, "completed", "Advanced editing complete. Shorts ready hain.",
             duration=duration, clip_count=len(names), clips=names,
-            caption_count=total_caption_count, metadata=metadata,
+            thumbnail_paths=thumbnail_names, caption_count=total_caption_count, metadata=metadata,
             editing_features=[
                 "9:16 vertical framing", "AI speech captions burned into video",
                 "Smart zoom", "Colour enhancement", "Audio loudness enhancement",
