@@ -807,12 +807,12 @@ def cleanup_expired_clip_history():
                 saved_uploads = {}
         except (OSError, ValueError, json.JSONDecodeError):
             saved_uploads = {}
-        pending_clips = [
-            clip for clip in clips
-            if not (isinstance(saved_uploads.get(clip.name), dict)
-                    and saved_uploads[clip.name].get("video_id"))
-            and not saved_uploads.get(clip.name)
-        ]
+        pending_clips = []
+        for clip in clips:
+            saved = saved_uploads.get(clip.name)
+            saved_id = saved.get("video_id") if isinstance(saved, dict) else saved
+            if not saved_id:
+                pending_clips.append(clip)
         if pending_clips:
             continue
         if now - newest_clip_time >= CLIP_HISTORY_RETENTION_SECONDS:
@@ -1463,8 +1463,8 @@ with st.sidebar:
     )
 
 if st.session_state.page == "history":
-    st.subheader("🕒 Clip History — last 1 hour")
-    st.caption("Generated clips yahan 1 ghante tak milengi. Iske baad app unhe automatically clean up karegi jab history check hogi.")
+    st.subheader("🕒 Clip History & Upload Queue")
+    st.caption("Jo clips abhi upload nahi hui hain, woh upload hone tak queue mein saved rahengi. Streamlit Cloud ka temporary storage restart par clear ho sakta hai.")
     history_items = list_clip_history()
     if history_items:
         for item in history_items:
@@ -1481,6 +1481,24 @@ if st.session_state.page == "history":
                         history_uploads = {}
                 except (FileNotFoundError, json.JSONDecodeError, OSError):
                     history_uploads = {}
+
+                if st.session_state.get("youtube_credentials"):
+                    if st.button(
+                        "📅 Schedule next 1–2 queued clips",
+                        key=f"history_schedule_batch_{job_dir.name}",
+                        use_container_width=True
+                    ):
+                        try:
+                            yt_service = get_youtube_service()
+                            batch_results = upload_clips_to_youtube(
+                                yt_service, clips, str(upload_status_path),
+                                load_video_metadata(job_dir)
+                            )
+                            for clip_name, video_id, status in batch_results:
+                                st.success(f"{clip_name}: https://www.youtube.com/watch?v={video_id} ({status})")
+                            st.rerun()
+                        except Exception as batch_error:
+                            st.error(f"Queue upload nahi ho paaya: {str(batch_error)[:400]}")
 
                 for clip_path in clips:
                     st.write(f"**{clip_path.name}**")
