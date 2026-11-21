@@ -38,6 +38,8 @@ jobs:
           sudo apt-get install -y ffmpeg fonts-dejavu-core
       - name: Install dependencies
         run: pip install -r requirements.txt
+      - name: Validate worker syntax
+        run: python -m py_compile worker.py
       - name: Process private video job
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
