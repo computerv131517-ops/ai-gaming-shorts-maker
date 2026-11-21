@@ -215,7 +215,7 @@ def render_clip(ffmpeg, source, output, start, end, captions, index, metadata, t
     make_sound_effects(sfx, length)
 
     # Vertical crop, subtle periodic smart zoom, cinematic colour tuning,
-    # readable burned-in captions, and a persistent Like/Subscribe footer.
+    # readable captions, and a clean top banner on a solid black strip.
     zoom = (
         "scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,"
@@ -225,9 +225,9 @@ def render_clip(ffmpeg, source, output, start, end, captions, index, metadata, t
         f"subtitles='{ffmpeg_escape(srt)}':force_style='FontName=DejaVu Sans,FontSize=18,"
         "Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,BorderStyle=1,"
         "Outline=2,Shadow=1,Alignment=2,MarginV=190',"
-        "drawbox=x=0:y=ih-132:w=iw:h=132:color=0x080D18@0.82:t=fill,"
+        "drawbox=x=0:y=0:w=iw:h=112:color=black:t=fill,"
         f"drawtext=fontfile='{FONT}':text='LIKE  •  SUBSCRIBE':"
-        "fontcolor=white:fontsize=42:x=(w-text_w)/2:y=h-94:"
+        "fontcolor=white:fontsize=40:x=(w-text_w)/2:y=31:"
         "shadowcolor=black:shadowx=2:shadowy=2"
     )
     cmd = [
