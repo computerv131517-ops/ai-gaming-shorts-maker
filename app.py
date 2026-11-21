@@ -513,7 +513,7 @@ def get_job_dir(video_path, vertical, category):
     with open(video_path, "rb") as source:
         for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""):
             digest.update(chunk)
-    settings = f"auto-semantic-variable-duration-v2|{int(vertical)}|{category}"
+    settings = f"viral-edit-semantic-variable-duration-v3|{int(vertical)}|{category}"
     job_id = hashlib.sha256((digest.hexdigest() + settings).encode()).hexdigest()[:20]
     folder = UPLOAD_DIR / "processing_jobs" / job_id
     folder.mkdir(parents=True, exist_ok=True)
@@ -588,7 +588,7 @@ def extract_audio_activity(video_path, sample_times):
     except Exception:
         return np.zeros(len(sample_times), dtype=np.float32)
 
-def analyse_video_with_gemini(video_path, duration, category):
+def analyse_video_with_gemini(video_path, duration, category, captions_path=None):
     """Use Gemini video understanding to find real, context-complete highlights."""
     api_key = get_gemini_api_key()
     if not api_key:
@@ -648,9 +648,13 @@ For each highlight choose precise start_seconds and end_seconds:
 - Return all distinct strong moments; do not invent moments just to increase the count.
 - Timestamps must be within the source video's duration.
 
+Also transcribe clearly audible human speech for on-screen captions. Return short readable caption
+segments with approximate start_seconds and end_seconds. Do not invent words; omit unclear speech.
+
 Return ONLY valid JSON in this exact structure:
-{{"highlights":[{{"start_seconds":12.5,"end_seconds":48.0,"event":"laughing / excited reaction","reason":"Briefly describe the audible or visible cue and the context","confidence":0.93}}]}}
-If no genuinely strong moments exist, return {{"highlights":[]}}.
+{{"highlights":[{{"start_seconds":12.5,"end_seconds":48.0,"event":"laughing / excited reaction","reason":"Briefly describe the audible or visible cue and the context","confidence":0.93}}],
+"captions":[{{"start_seconds":13.1,"end_seconds":14.8,"text":"No way, that was close!"}}]}}
+If no genuinely strong moments exist, return {{"highlights":[],"captions":[]}}.
 """
         response = client.models.generate_content(
             model="gemini-3.8-flash",
@@ -665,6 +669,26 @@ If no genuinely strong moments exist, return {{"highlights":[]}}.
         raw_highlights = data.get("highlights", [])
         if not isinstance(raw_highlights, list):
             raise ValueError("Gemini response ka highlights format valid nahi hai.")
+
+        # Keep only clear, bounded speech segments for optional burned-in captions.
+        if captions_path:
+            clean_captions = []
+            raw_captions = data.get("captions", [])
+            for caption in raw_captions if isinstance(raw_captions, list) else []:
+                if not isinstance(caption, dict):
+                    continue
+                try:
+                    cap_start = max(0.0, float(caption["start_seconds"]))
+                    cap_end = min(float(duration), float(caption["end_seconds"]))
+                    cap_text = re.sub(r"\\s+", " ", str(caption.get("text", ""))).strip()
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if cap_text and 0 <= cap_start < cap_end <= duration and cap_end - cap_start <= 12:
+                    clean_captions.append({
+                        "start_seconds": cap_start, "end_seconds": cap_end,
+                        "text": cap_text[:180]
+                    })
+            save_json_atomic(captions_path, clean_captions)
 
         candidates = []
         for item in raw_highlights:
@@ -722,7 +746,10 @@ def analyse_video(video_path, checkpoint_file, category):
 
     # Prefer semantic AI understanding when a Gemini key is available.
     try:
-        semantic_chosen = analyse_video_with_gemini(video_path, duration, category)
+        semantic_chosen = analyse_video_with_gemini(
+            video_path, duration, category,
+            str(Path(checkpoint_file).parent / "captions.json")
+        )
         if semantic_chosen:
             try:
                 os.remove(checkpoint_file)
@@ -862,38 +889,148 @@ def analyse_video(video_path, checkpoint_file, category):
     return duration, sorted(chosen, key=lambda item: item[1])
 
 
-def export_clips(video_path, chosen, vertical, output_dir):
+def _srt_timestamp(seconds):
+    milliseconds = max(0, int(round(seconds * 1000)))
+    hours, remainder = divmod(milliseconds, 3600000)
+    minutes, remainder = divmod(remainder, 60000)
+    whole_seconds, millis = divmod(remainder, 1000)
+    return f"{hours:02}:{minutes:02}:{whole_seconds:02},{millis:03}"
+
+
+def _write_clip_srt(captions_path, clip_start, clip_end, srt_path):
+    try:
+        with open(captions_path, "r", encoding="utf-8") as file:
+            captions = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return False
+    entries = []
+    for caption in captions if isinstance(captions, list) else []:
+        try:
+            start = max(float(caption["start_seconds"]), clip_start)
+            end = min(float(caption["end_seconds"]), clip_end)
+            caption_text = re.sub(r"[\\r\\n]+", " ", str(caption.get("text", ""))).strip()
+        except (KeyError, TypeError, ValueError):
+            continue
+        if caption_text and end > start:
+            entries.append((start - clip_start, end - clip_start, caption_text))
+    if not entries:
+        return False
+    with open(srt_path, "w", encoding="utf-8") as file:
+        for index, (start, end, caption_text) in enumerate(entries, 1):
+            file.write(f"{index}\\n{_srt_timestamp(start)} --> {_srt_timestamp(end)}\\n{caption_text}\\n\\n")
+    return True
+
+
+def _create_whoosh(output_dir):
+    """Create a quiet, original whoosh sound effect without external assets."""
+    import wave
+    sample_rate = 22050
+    count = int(sample_rate * 0.42)
+    noise = np.random.default_rng(42).normal(0, 1, count).astype(np.float32)
+    smooth = np.convolve(noise, np.ones(18, dtype=np.float32) / 18.0, mode="same")
+    envelope = np.sin(np.linspace(0, np.pi, count, dtype=np.float32)) ** 1.5
+    audio = smooth * envelope
+    peak = float(np.max(np.abs(audio))) if audio.size else 1.0
+    samples = (np.clip(audio / max(peak, 1e-6) * 0.22, -1, 1) * 32767).astype(np.int16)
+    path = Path(output_dir) / "subtle_whoosh.wav"
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(samples.tobytes())
+    return path
+
+
+def _has_audio_stream(ffmpeg, video_path):
+    probe = subprocess.run(
+        [ffmpeg, "-v", "error", "-i", str(video_path), "-map", "0:a:0",
+         "-t", "0.05", "-f", "null", "-"],
+        capture_output=True, text=True
+    )
+    return probe.returncode == 0
+
+
+def export_clips(video_path, chosen, vertical, output_dir, captions_path=None):
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     os.makedirs(output_dir, exist_ok=True)
     outputs = []
-    progress = st.progress(0, text="Clips export ho rahi hain...")
+    progress = st.progress(0, text="Viral edits apply ho rahe hain...")
+    whoosh_path = _create_whoosh(output_dir)
+    has_audio = _has_audio_stream(ffmpeg, video_path)
     for index, (score, start_time, end_time) in enumerate(chosen, start=1):
         output_path = os.path.join(output_dir, f"Gaming_Short_{index}.mp4")
         if os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
             outputs.append(output_path)
             progress.progress(index / len(chosen),
-                              text=f"Saved clip reuse ho rahi hai... {index}/{len(chosen)}")
+                              text=f"Edited clip reuse ho rahi hai... {index}/{len(chosen)}")
             continue
         if os.path.exists(output_path):
             os.remove(output_path)
         clip_duration = end_time - start_time
+        srt_path = str(Path(output_dir) / f"Gaming_Short_{index}.srt")
+        has_captions = bool(captions_path and _write_clip_srt(
+            captions_path, start_time, end_time, srt_path
+        ))
+
+        if vertical:
+            video_filter = (
+                "scale=1080:1920:force_original_aspect_ratio=decrease,"
+                "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,"
+                "fps=30,zoompan=z='min(zoom+0.00012,1.045)':d=1:"
+                "s=1080x1920:fps=30,eq=contrast=1.06:saturation=1.12:brightness=0.01"
+            )
+        else:
+            video_filter = (
+                "fps=30,zoompan=z='min(zoom+0.00012,1.045)':d=1:"
+                "s=1920x1080:fps=30,eq=contrast=1.06:saturation=1.12:brightness=0.01"
+            )
+        if has_captions:
+            escaped_srt = srt_path.replace("\\", "/").replace(":", "\\:")
+            video_filter += (
+                f",subtitles='{escaped_srt}':force_style="
+                "'FontName=DejaVu Sans,FontSize=18,PrimaryColour=&H00FFFFFF,"
+                "OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,"
+                "Alignment=2,MarginV=170'"
+            )
+
         command = [
             ffmpeg, "-y", "-ss", f"{start_time:.3f}", "-i", str(video_path),
-            "-t", f"{clip_duration:.3f}", "-map", "0:v:0", "-map", "0:a?"
+            "-t", f"{clip_duration:.3f}"
         ]
-        if vertical:
-            command += ["-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"]
+        if has_audio:
+            command += ["-i", str(whoosh_path)]
+        command += ["-map", "0:v:0", "-vf", video_filter]
+        if has_audio:
+            command += [
+                "-filter_complex",
+                "[0:a]loudnorm=I=-16:TP=-1.5:LRA=11[base];"
+                "[1:a]volume=0.18,adelay=120|120[fx];"
+                "[base][fx]amix=inputs=2:duration=first:dropout_transition=0[aout]",
+                "-map", "[aout]"
+            ]
+        else:
+            command += ["-an"]
         command += [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
-            "-movflags", "+faststart", output_path
+            "-pix_fmt", "yuv420p"
         ]
+        if has_audio:
+            command += ["-c:a", "aac", "-b:a", "192k"]
+        command += ["-movflags", "+faststart", output_path]
+
         result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0 and has_captions:
+            fallback_filter = video_filter.split(",subtitles=", 1)[0]
+            command[command.index("-vf") + 1] = fallback_filter
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode == 0:
+                st.warning(f"Clip {index}: FFmpeg captions support unavailable; other edits applied.")
         if result.returncode != 0:
             details = result.stderr[-1800:] if result.stderr else "Unknown FFmpeg error"
             raise RuntimeError(f"Clip {index} export nahi hui:\\n{details}")
         outputs.append(output_path)
-        progress.progress(index / len(chosen), text=f"Clips export ho rahi hain... {index}/{len(chosen)}")
+        progress.progress(index / len(chosen),
+                          text=f"Viral edits complete... {index}/{len(chosen)}")
     progress.empty()
     return outputs
 
@@ -904,7 +1041,7 @@ with st.sidebar:
         st.rerun()
     st.divider()
     st.header("⚙️ Clip settings")
-    st.info("Smart Auto Clipping: har moment ki duration automatically choose hogi (10 seconds se maximum 3 minutes). Koi fixed clip-count limit nahi hai.")
+    st.info("Viral Auto Editing ON: smart 9:16 framing, gentle zoom, AI captions when Gemini speech transcript is available, audio leveling, color boost aur subtle whoosh SFX. Clip duration 10 seconds se maximum 3 minutes.")
     vertical = st.checkbox("9:16 YouTube Shorts format", value=True)
     category = st.selectbox(
         "Video category",
@@ -1122,7 +1259,8 @@ else:
                         for i, (score, start_time, end_time) in enumerate(chosen, 1):
                             st.write(f"**Clip {i}:** {start_time:.1f}s – {end_time:.1f}s · Duration: {end_time - start_time:.1f}s · Highlight score: {score:.2f}")
                         outputs = export_clips(
-                            selected_path, chosen, vertical, output_dir
+                            selected_path, chosen, vertical, output_dir,
+                            str(job_dir / "captions.json")
                         )
                         st.success(f"{len(outputs)} clips ready! Progress saved hai.")
                         try:
