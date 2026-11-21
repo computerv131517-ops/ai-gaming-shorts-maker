@@ -1073,6 +1073,7 @@ else:
                         with open(analysis_file, "r", encoding="utf-8") as file:
                             saved_analysis = json.load(file)
                         duration = float(saved_analysis["duration"])
+                        st.session_state["last_analysis_mode"] = saved_analysis.get("mode", "Older saved analysis")
                         chosen = [(float(item[0]), float(item[1]), float(item[2]))
                                   for item in saved_analysis["chosen"] if len(item) >= 3]
                         if not chosen:
@@ -1088,12 +1089,13 @@ else:
                             save_json_atomic(analysis_file, {
                                 "duration": duration,
                                 "category": category,
-                                "mode": "variable_duration",
+                                "mode": st.session_state.get("last_analysis_mode", "Visual + audio fallback"),
                                 "chosen": [[score, start_time, end_time]
                                            for score, start_time, end_time in chosen]
                             })
                     if chosen:
                         st.subheader("⭐ Selected gameplay moments")
+                        st.caption(f"Detection method: {st.session_state.get('last_analysis_mode', 'Automatic detection')}")
                         for i, (score, start_time, end_time) in enumerate(chosen, 1):
                             st.write(f"**Clip {i}:** {start_time:.1f}s – {end_time:.1f}s · Duration: {end_time - start_time:.1f}s · Highlight score: {score:.2f}")
                         outputs = export_clips(
