@@ -680,7 +680,7 @@ If no genuinely strong moments exist, return {{"highlights":[],"captions":[]}}.
                 try:
                     cap_start = max(0.0, float(caption["start_seconds"]))
                     cap_end = min(float(duration), float(caption["end_seconds"]))
-                    cap_text = re.sub(r"\\s+", " ", str(caption.get("text", ""))).strip()
+                    cap_text = re.sub(r"\s+", " ", str(caption.get("text", ""))).strip()
                 except (KeyError, TypeError, ValueError):
                     continue
                 if cap_text and 0 <= cap_start < cap_end <= duration and cap_end - cap_start <= 12:
