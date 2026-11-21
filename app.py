@@ -234,7 +234,8 @@ def handle_youtube_oauth_callback():
         return
     try:
         flow = Flow.from_client_config(
-            config, scopes=YOUTUBE_UPLOAD_SCOPE, state=returned_state
+            config, scopes=YOUTUBE_UPLOAD_SCOPE, state=returned_state,
+            autogenerate_code_verifier=False
         )
         flow.redirect_uri = YOUTUBE_REDIRECT_URI
         flow.fetch_token(code=code)
@@ -707,7 +708,10 @@ with st.sidebar:
             st.session_state.auto_upload_youtube = False
             st.rerun()
     else:
-        flow = Flow.from_client_config(oauth_config, scopes=YOUTUBE_UPLOAD_SCOPE)
+        flow = Flow.from_client_config(
+            oauth_config, scopes=YOUTUBE_UPLOAD_SCOPE,
+            autogenerate_code_verifier=False
+        )
         flow.redirect_uri = YOUTUBE_REDIRECT_URI
         oauth_state = make_youtube_oauth_state(oauth_config["web"]["client_secret"])
         auth_url, _ = flow.authorization_url(
