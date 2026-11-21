@@ -672,7 +672,7 @@ with st.sidebar:
     st.divider()
     st.header("⚙️ Clip settings")
     clip_seconds = st.slider("Har clip ki length (seconds)", 10, 60, 20, 5)
-    number_of_clips = st.slider("Kitni clips banani hain?", 1, 20, 5)
+    number_of_clips = st.slider("Kitni clips banani hain?", 1, 20, 10)
     vertical = st.checkbox("9:16 YouTube Shorts format", value=True)
     category = st.selectbox(
         "Video category",
@@ -724,11 +724,11 @@ with st.sidebar:
         st.error(st.session_state.youtube_oauth_error)
     youtube_connected = bool(st.session_state.get("youtube_credentials"))
     auto_upload_youtube = st.checkbox(
-        "New clips automatically upload as Private",
-        value=st.session_state.get("auto_upload_youtube", False),
+        "Automatically upload all generated clips as Private (no review required)",
+        value=st.session_state.get("auto_upload_youtube_v2", True),
         disabled=not youtube_connected,
-        key="auto_upload_youtube",
-        help="Private upload hogi; channel par public nahi dikhegi jab tak tum visibility change na karo."
+        key="auto_upload_youtube_v2",
+        help="After processing finishes, every generated clip uploads automatically as Private. You can turn this off before processing."
     )
 
 if st.session_state.page == "history":
