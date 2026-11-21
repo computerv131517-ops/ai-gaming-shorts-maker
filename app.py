@@ -592,7 +592,7 @@ def analyse_video_with_gemini(video_path, duration, category):
     client = genai.Client(api_key=api_key)
     uploaded_file = None
     try:
-        st.info("🧠 Gemini gameplay understanding: events, context aur complete moments analyse ho rahe hain...")
+        st.info("🧠 Gemini AI visuals + audio analyse kar raha hai: laughter, shouting, surprise, excitement, frustration aur gameplay highlights...")
         uploaded_file = client.files.upload(file=str(video_path))
         started = time.time()
         while not uploaded_file.state or uploaded_file.state.name != "ACTIVE":
@@ -609,24 +609,41 @@ including visual events, game context, reactions and available audio.
 Video duration: {duration:.2f} seconds.
 Selected category: {category}.
 
-Find every genuinely strong, distinct, short-form-worthy moment. For gaming, look for
-kills, multi-kills, clutch attempts/results, close escapes, intense fights, funny
-mistakes, unexpected events, impressive skill, wins and strong reactions. Do not
-assume an event happened: only report moments clearly visible/audible in this video.
-For other categories, identify the equivalent genuinely interesting complete moments.
+Find every genuinely strong, distinct, short-form-worthy moment. Analyse BOTH the visuals
+AND the audio carefully; do not rely only on action on screen.
+
+For gaming, look for kills, multi-kills, clutch attempts/results, close escapes, intense
+fights, funny mistakes, unexpected events, impressive skill, wins and strong reactions.
+Pay special attention to human vocal reactions when audible:
+- laughter, giggling, laughing so hard that speech breaks
+- shouting, yelling, screaming, loud excited callouts or celebrations
+- surprise, gasps, shocked reactions and disbelief
+- frustration, anger, complaining or disappointed reactions
+- nervousness, suspense, fear, relief and excitement
+- emotional speech, teasing, playful banter and funny conversations
+
+Use the actual audio to locate the beginning and end of these reactions. Distinguish a
+person's voice from game sound effects, music and crowd/game audio where possible.
+Do not label an emotion just because the gameplay looks intense: it must be supported
+by audible speech/vocal cues, or clearly visible facial/body cues if a person is shown.
+Do not guess what a person feels or invent reactions. If there is no clear human reaction,
+focus on the gameplay event. For other categories, detect equivalent audible and visible
+emotional moments such as laughter, surprise, excitement, frustration and heartfelt reactions.
 
 For each highlight choose precise start_seconds and end_seconds:
 - Include enough lead-in to understand what is happening and the complete payoff/reaction.
-- Do not cut in the middle of an action, sentence, joke or reaction.
+- For a laugh, shout or emotional reaction, include the setup and the full reaction, not just
+  the loudest instant; preserve a little context before and after it.
+- Do not cut in the middle of an action, sentence, joke, laugh or reaction.
 - Let each moment have its natural duration; do NOT force a common duration.
 - Each clip must be at least 10 seconds and no longer than 180 seconds.
-- Prefer one complete event, not arbitrary chunks of unrelated gameplay.
+- Prefer one complete event/reaction, not arbitrary chunks of unrelated footage.
 - Avoid filler, repetitive scenes and overlapping/duplicate moments.
 - Return all distinct strong moments; do not invent moments just to increase the count.
 - Timestamps must be within the source video's duration.
 
 Return ONLY valid JSON in this exact structure:
-{{"highlights":[{{"start_seconds":12.5,"end_seconds":48.0,"event":"clutch","reason":"Brief factual explanation","confidence":0.93}}]}}
+{{"highlights":[{{"start_seconds":12.5,"end_seconds":48.0,"event":"laughing / excited reaction","reason":"Briefly describe the audible or visible cue and the context","confidence":0.93}}]}}
 If no genuinely strong moments exist, return {{"highlights":[]}}.
 """
         response = client.models.generate_content(
@@ -888,7 +905,7 @@ with st.sidebar:
         ["Auto (all categories)", "Gaming", "Sports", "Vlog / Travel",
          "Podcast / Talking", "Education / Tutorial", "Reaction / Comedy", "Other"]
     )
-    st.caption("Gemini API key ke saath semantic gameplay understanding (kills, clutch, funny moments, fights, wins) use hogi. Key na ho ya AI fail ho toh visual/audio fallback chalega.")
+    st.caption("Gemini AI video ke visuals + audio dono se kills, clutch, funny moments, laughter, shouting, surprise, excitement, frustration aur doosre clear reactions detect karega. Key na ho ya AI fail ho toh visual/audio fallback chalega.")
     st.divider()
     st.header("✨ AI video metadata")
     st.text_input(
