@@ -1,0 +1,45 @@
+name: On-demand video processing
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Supabase job folder ID
+        required: true
+        type: string
+      category:
+        description: Video category
+        required: false
+        default: Gaming
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: video-job-${{ inputs.job_id }}
+  cancel-in-progress: false
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Check out app
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Process private video job
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          VIDEO_CATEGORY: ${{ inputs.category }}
+        run: python worker.py --job-id '${{ inputs.job_id }}'
