@@ -227,6 +227,32 @@ def download_background_clips(job_id, clip_paths):
     return downloaded
 
 
+def load_background_upload_status(job_id):
+    """Load durable YouTube upload state for background clips from private storage."""
+    config = background_config()
+    url = config["supabase_url"] + f"/storage/v1/object/authenticated/gaming-videos/jobs/{job_id}/youtube_uploads.json"
+    response = requests.get(url, headers=background_headers(config), timeout=30)
+    if response.status_code == 404:
+        return {}
+    response.raise_for_status()
+    data = response.json()
+    return data if isinstance(data, dict) else {}
+
+
+def save_background_upload_status(job_id, uploaded):
+    """Persist each successful background-clip upload before continuing the batch."""
+    config = background_config()
+    url = config["supabase_url"] + f"/storage/v1/object/gaming-videos/jobs/{job_id}/youtube_uploads.json"
+    headers = background_headers(config)
+    headers.update({"Content-Type": "application/json", "x-upsert": "true"})
+    response = requests.post(
+        url, headers=headers,
+        data=json.dumps(uploaded, ensure_ascii=False).encode("utf-8"),
+        timeout=30
+    )
+    response.raise_for_status()
+
+
 def download_video_from_url(video_url):
     """Download a public video with live percentage and ETA when available."""
     parsed = urlparse(video_url.strip())
@@ -797,7 +823,7 @@ def upload_clip_now_to_youtube(youtube, clip_path, status_path, metadata=None):
     return video_id, "uploaded privately"
 
 
-def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
+def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None, status_sync_callback=None):
     """Upload at most two pending clips per run and leave the rest queued locally."""
     try:
         with open(status_path, "r", encoding="utf-8") as file:
@@ -893,6 +919,8 @@ def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
                 "thumbnail_status": "pending",
             }
             save_json_atomic(status_path, uploaded)
+            if status_sync_callback:
+                status_sync_callback(uploaded)
 
             thumb_ok = apply_youtube_thumbnail(
                 youtube, video_id, clip_path, Path(status_path).parent,
@@ -900,6 +928,8 @@ def upload_clips_to_youtube(youtube, clip_paths, status_path, metadata=None):
             )
             uploaded[clip_path.name]["thumbnail_status"] = "set" if thumb_ok else "not_set"
             save_json_atomic(status_path, uploaded)
+            if status_sync_callback:
+                status_sync_callback(uploaded)
 
             # Delete the local clip only after YouTube has confirmed the upload.
             try:
@@ -1876,18 +1906,68 @@ else:
                                 mime="image/jpeg",
                                 key=f"bg_thumbnail_{bg_job_id}_{thumbnail_path.name}"
                             )
-                    for clip_string in st.session_state.get("background_local_clips", []):
-                        clip_path = Path(clip_string)
-                        if clip_path.exists():
-                            with st.expander(clip_path.name, expanded=False):
-                                st.video(str(clip_path))
-                                st.download_button(
-                                    f"⬇️ Download {clip_path.name}",
-                                    data=clip_path.read_bytes(),
-                                    file_name=clip_path.name,
-                                    mime="video/mp4",
-                                    key=f"bg_download_{bg_job_id}_{clip_path.name}"
-                                )
+                    bg_clips = [
+                        Path(item) for item in st.session_state.get("background_local_clips", [])
+                        if Path(item).is_file()
+                    ]
+                    bg_upload_status_path = (
+                        UPLOAD_DIR / "background_jobs" / bg_job_id / "youtube_uploads.json"
+                    )
+                    try:
+                        bg_upload_status = load_background_upload_status(bg_job_id)
+                        save_json_atomic(bg_upload_status_path, bg_upload_status)
+                    except Exception as queue_error:
+                        st.warning("Background upload queue status load nahi hui: " + str(queue_error)[:250])
+                        try:
+                            with open(bg_upload_status_path, "r", encoding="utf-8") as saved_file:
+                                bg_upload_status = json.load(saved_file)
+                        except (OSError, json.JSONDecodeError):
+                            bg_upload_status = {}
+
+                    if bg_clips and st.session_state.get("youtube_credentials"):
+                        pending_bg = []
+                        for clip in bg_clips:
+                            saved = bg_upload_status.get(clip.name)
+                            saved_id = saved.get("video_id") if isinstance(saved, dict) else saved
+                            if not saved_id:
+                                pending_bg.append(clip)
+                        if pending_bg:
+                            st.caption(f"{len(pending_bg)} background clip(s) YouTube upload ke liye pending hain.")
+                            if st.button(
+                                "📅 Upload next 1–2 background clips",
+                                key=f"bg_upload_batch_{bg_job_id}",
+                                use_container_width=True
+                            ):
+                                try:
+                                    yt_service = get_youtube_service()
+                                    results = upload_clips_to_youtube(
+                                        yt_service, pending_bg, str(bg_upload_status_path),
+                                        bg_status.get("metadata", {}),
+                                        status_sync_callback=lambda data: save_background_upload_status(bg_job_id, data)
+                                    )
+                                    for clip_name, video_id, upload_state in results:
+                                        st.success(f"{clip_name}: https://www.youtube.com/watch?v={video_id} ({upload_state})")
+                                    st.rerun()
+                                except Exception as bg_upload_error:
+                                    st.error("Background clips upload nahi ho paayi: " + str(bg_upload_error)[:450])
+
+                    for clip_path in bg_clips:
+                        saved = bg_upload_status.get(clip_path.name)
+                        saved_id = saved.get("video_id") if isinstance(saved, dict) else saved
+                        with st.expander(clip_path.name, expanded=False):
+                            if saved_id:
+                                st.success("YouTube par upload ho chuki hai.")
+                                st.markdown(f"[YouTube video kholo](https://www.youtube.com/watch?v={saved_id})")
+                            else:
+                                st.info("Upload pending — clip private Supabase Storage mein safe hai.")
+                            st.video(str(clip_path))
+                            st.download_button(
+                                f"⬇️ Download {clip_path.name}",
+                                data=clip_path.read_bytes(),
+                                file_name=clip_path.name,
+                                mime="video/mp4",
+                                key=f"bg_download_{bg_job_id}_{clip_path.name}"
+                            )
                 elif state == "failed":
                     st.error("Worker fail hua. Status message mein error detail dekho.")
         col1, col2 = st.columns(2)
