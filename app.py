@@ -134,15 +134,21 @@ def _format_wait(seconds):
 
 
 def background_config():
-    """Read private worker credentials from Streamlit Cloud Secrets."""
+    """Read private worker credentials and retain safe diagnostics (never values)."""
+    config = {"supabase_url": "", "supabase_key": "", "github_token": ""}
     try:
-        return {
-            "supabase_url": str(st.secrets.get("SUPABASE_URL", "")).strip().rstrip("/"),
-            "supabase_key": str(st.secrets.get("SUPABASE_SECRET_KEY", "")).strip(),
-            "github_token": str(st.secrets.get("GITHUB_TOKEN", "")).strip(),
-        }
-    except Exception:
-        return {"supabase_url": "", "supabase_key": "", "github_token": ""}
+        config["supabase_url"] = str(st.secrets.get("SUPABASE_URL", os.environ.get("SUPABASE_URL", ""))).strip().rstrip("/")
+        config["supabase_key"] = str(st.secrets.get("SUPABASE_SECRET_KEY", os.environ.get("SUPABASE_SECRET_KEY", ""))).strip()
+        config["github_token"] = str(st.secrets.get("GITHUB_TOKEN", os.environ.get("GITHUB_TOKEN", ""))).strip()
+        st.session_state["secrets_read_error"] = None
+    except Exception as error:
+        st.session_state["secrets_read_error"] = f"{type(error).__name__}: {str(error)[:220]}"
+    st.session_state["secret_presence"] = {
+        "SUPABASE_URL": bool(config["supabase_url"]),
+        "SUPABASE_SECRET_KEY": bool(config["supabase_key"]),
+        "GITHUB_TOKEN": bool(config["github_token"]),
+    }
+    return config
 
 
 def background_headers(config):
@@ -1631,6 +1637,14 @@ with st.sidebar:
         st.caption("Secrets mein save karne ke baad har session mein key dobara paste nahi karni padegi. Bina key ke visual/audio fallback clipping chalegi.")
     st.divider()
     st.header("▶️ YouTube channel")
+    secret_presence = st.session_state.get("secret_presence", {})
+    if secret_presence:
+        st.caption(
+            "Secrets check — " +
+            " | ".join(f"{name}: {'found' if present else 'missing'}" for name, present in secret_presence.items())
+        )
+    if st.session_state.get("secrets_read_error"):
+        st.warning("Streamlit Secrets read error: " + st.session_state["secrets_read_error"])
     oauth_config = youtube_oauth_config()
     if not oauth_config:
         st.warning("YouTube connection setup pending hai.")
