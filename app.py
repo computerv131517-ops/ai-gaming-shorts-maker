@@ -1,4 +1,5 @@
 import os
+import base64
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -358,6 +359,73 @@ def valid_youtube_oauth_state(state, client_secret):
     return hmac.compare_digest(supplied_signature, expected_signature)
 
 
+def _youtube_token_cipher():
+    """
+    Derive an encryption key from the private Supabase service key.
+    The OAuth token is encrypted before it is stored in the private bucket.
+    """
+    config = background_config()
+    secret = config.get("supabase_key", "")
+    if not secret:
+        raise RuntimeError("Persistent YouTube login ke liye Supabase Secrets configure karo.")
+    derived = hashlib.sha256(
+        (secret + "|ai-gaming-shorts-maker|youtube-oauth-v1").encode("utf-8")
+    ).digest()
+    return Fernet(base64.urlsafe_b64encode(derived))
+
+
+def save_persistent_youtube_credentials(token_json):
+    config = background_config()
+    if not config.get("supabase_url") or not config.get("supabase_key"):
+        raise RuntimeError("Streamlit Secrets mein SUPABASE_URL aur SUPABASE_SECRET_KEY missing hain.")
+    encrypted = _youtube_token_cipher().encrypt(token_json.encode("utf-8"))
+    url = config["supabase_url"] + "/storage/v1/object/gaming-videos/youtube-auth/credentials.enc"
+    headers = background_headers(config)
+    headers.update({
+        "Content-Type": "application/octet-stream",
+        "x-upsert": "true",
+    })
+    response = requests.post(url, headers=headers, data=encrypted, timeout=30)
+    response.raise_for_status()
+
+
+def load_persistent_youtube_credentials():
+    config = background_config()
+    if not config.get("supabase_url") or not config.get("supabase_key"):
+        return None
+    url = config["supabase_url"] + "/storage/v1/object/authenticated/gaming-videos/youtube-auth/credentials.enc"
+    response = requests.get(url, headers=background_headers(config), timeout=20)
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    try:
+        return _youtube_token_cipher().decrypt(response.content).decode("utf-8")
+    except (InvalidToken, UnicodeDecodeError) as error:
+        raise RuntimeError("Saved YouTube login decrypt nahi ho paaya. Google account dobara connect karo.") from error
+
+
+def delete_persistent_youtube_credentials():
+    config = background_config()
+    if not config.get("supabase_url") or not config.get("supabase_key"):
+        return
+    url = config["supabase_url"] + "/storage/v1/object/gaming-videos/youtube-auth/credentials.enc"
+    response = requests.delete(url, headers=background_headers(config), timeout=20)
+    if response.status_code not in (200, 204, 404):
+        response.raise_for_status()
+
+
+def restore_persistent_youtube_credentials():
+    if st.session_state.get("youtube_credentials"):
+        return
+    try:
+        token_json = load_persistent_youtube_credentials()
+        if token_json:
+            st.session_state.youtube_credentials = token_json
+            st.session_state.youtube_persistence_error = None
+    except Exception as error:
+        st.session_state.youtube_persistence_error = str(error)[:300]
+
+
 def handle_youtube_oauth_callback():
     code = st.query_params.get("code")
     returned_state = st.query_params.get("state")
@@ -378,10 +446,13 @@ def handle_youtube_oauth_callback():
         )
         flow.redirect_uri = YOUTUBE_REDIRECT_URI
         flow.fetch_token(code=code)
-        st.session_state.youtube_credentials = flow.credentials.to_json()
+        token_json = flow.credentials.to_json()
+        st.session_state.youtube_credentials = token_json
+        save_persistent_youtube_credentials(token_json)
+        st.session_state.youtube_persistence_error = None
         st.session_state.youtube_oauth_error = None
     except Exception as error:
-        st.session_state.youtube_oauth_error = "Google connection failed: " + str(error)[:300]
+        st.session_state.youtube_oauth_error = "Google connection/persistent save failed: " + str(error)[:300]
     st.query_params.clear()
     st.rerun()
 
@@ -389,13 +460,19 @@ def handle_youtube_oauth_callback():
 def get_youtube_service():
     token_json = st.session_state.get("youtube_credentials")
     if not token_json:
+        token_json = load_persistent_youtube_credentials()
+        if token_json:
+            st.session_state.youtube_credentials = token_json
+    if not token_json:
         return None
     credentials = Credentials.from_authorized_user_info(
         json.loads(token_json), scopes=YOUTUBE_UPLOAD_SCOPE
     )
     if credentials.expired and credentials.refresh_token:
         credentials.refresh(Request())
-        st.session_state.youtube_credentials = credentials.to_json()
+        token_json = credentials.to_json()
+        st.session_state.youtube_credentials = token_json
+        save_persistent_youtube_credentials(token_json)
     if not credentials.valid:
         raise RuntimeError("YouTube session expire ho gaya. Google account dobara connect karo.")
     return build("youtube", "v3", credentials=credentials, cache_discovery=False)
@@ -869,6 +946,7 @@ def save_json_atomic(path, data):
 
 # Handle the Google redirect only after all helper functions are defined.
 handle_youtube_oauth_callback()
+restore_persistent_youtube_credentials()
 
 def get_job_dir(video_path, vertical, category):
     digest = hashlib.sha256()
@@ -1530,8 +1608,13 @@ with st.sidebar:
     elif st.session_state.get("youtube_credentials"):
         st.success("YouTube account connected")
         if st.button("Disconnect YouTube", use_container_width=True):
-            st.session_state.pop("youtube_credentials", None)
-            st.session_state.auto_upload_youtube = False
+            try:
+                delete_persistent_youtube_credentials()
+                st.session_state.pop("youtube_credentials", None)
+                st.session_state.auto_upload_youtube = False
+                st.session_state.youtube_persistence_error = None
+            except Exception as disconnect_error:
+                st.error("Saved login delete nahi hua: " + str(disconnect_error)[:250])
             st.rerun()
     else:
         try:
@@ -1552,6 +1635,8 @@ with st.sidebar:
             st.caption(str(oauth_error)[:250])
     if st.session_state.get("youtube_oauth_error"):
         st.error(st.session_state.youtube_oauth_error)
+    if st.session_state.get("youtube_persistence_error"):
+        st.warning("YouTube login restore/save issue: " + st.session_state.youtube_persistence_error)
     youtube_connected = bool(st.session_state.get("youtube_credentials"))
     auto_upload_youtube = st.checkbox(
         "Automatically upload and schedule the next 1–2 clips",
